@@ -1,17 +1,21 @@
 {
-    "name": "kvstorage",
-    "version": "1.0.0",
+    "name": "@rejetto/kvstorage",
+    "version": "0.1.0",
     "description": "Persistent key-value storage functionality with an API inspired by levelDB. All keys are kept in memory. Concurrency not supported.",
-    "main": "index.js",
+    "main": ".",
     "type": "commonjs",
     "scripts": {
-        "build": "tsc index",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "build": "tsc",
+        "test": "tsc && node test"
     },
+    "files": [
+        "index.ts",
+        "index.js",
+        "index.js.map"
+    ],
     "peerDependencies": {
         "typescript": ">=4.9.0"
     },
-    "private": true,
     "devDependencies": {
         "@tsconfig/node18": "^18.2.4",
         "@types/node": "^18.19.0"

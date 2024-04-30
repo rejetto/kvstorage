@@ -32,11 +32,14 @@ export interface KvStorageOptions {
 type MemoryValue = { v?: Encodable, file?: string, format?: 'json', offset?: number, size?: number }
     | undefined
 
+type IteratorOptions = { startsWith?: string, limit?: number }
+
 // persistent key-value storage functionality with an API inspired by levelDB
 export class KvStorage extends EventEmitter implements KvStorageOptions {
     map = new Map<string, MemoryValue>()
     path = ''
     folder = ''
+    static subSeparator = ''
     isOpen = false
     isDeleting = false
     writeStream: WriteStream | undefined = undefined
@@ -58,11 +61,14 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             : v
     }
 
-    async open(path: string) {
+    async open(path: string, { clear=false }={}) {
         if (this.isOpen)
             throw "cannot open twice"
         this.path = path
         this.folder = path + '$'
+        if (clear)
+            await this.unlink().catch(() => {})
+        this.isDeleting = false
         const wasted = await this.load()
         if (wasted! > (this.rewriteThreshold || 1))
             await this.rewrite()
@@ -90,8 +96,9 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return
             const {folder} = this
-            if (was?.file)
-                await unlink(join(folder, was?.file))
+            const oldFile = this.map.get(key)?.file // don't use `was` as an async writing could have happened in the meantime
+            if (oldFile)
+                await unlink(join(folder, oldFile))
             const saveExternalFile = async (content: Buffer | string, format?: 'json') => {
                 let filename = this.keyToFileName(key)
                 const n = this.files.get(filename)
@@ -100,21 +107,21 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 await mkdir(folder).catch(() => {})
                 await writeFile(join(folder, filename), content)
                 const newRecord = { file: filename, format } as const
-                await this.appendLine(await this.renderRecord(key, newRecord))
+                await this.appendLine(await this.encodeRecord(key, newRecord))
                 this.map.set(key, newRecord)
             }
-            const itsBuffer = value && value instanceof Buffer
-            if (itsBuffer && value.length > this.fileThreshold) // optimization for simple buffers
+            const isBuffer = value instanceof Buffer
+            if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                 return saveExternalFile(value)
             const encodeValue = (v: Encodable) => v === undefined ? '' : JSON.stringify(v)
-            const encodedOldValue = await this.readPart(was) ?? encodeValue(was?.v)
+            const encodedOldValue = await this.readPartEncoded(was) ?? encodeValue(was?.v)
             const encodedNewValue = encodeValue(value)
             //return mv?.v ?? this.readPart(mv)?.then(line => this.decode(line||'')?.v)
             if (encodedNewValue === encodedOldValue) return
             if (encodedNewValue?.length! > this.fileThreshold)
-                return itsBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
+                return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
                     : saveExternalFile(encodedNewValue!, 'json')
-            const { offset, size } = await this.appendLine(await this.renderRecord(key, will))
+            const { offset, size } = await this.appendLine(await this.encodeRecord(key, will))
             if (size > this.memoryThreshold) // once written, consider discarding from memory
                 this.map.set(key, { offset, size })
         })
@@ -125,7 +132,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return await this.readFile(v) ?? await this.readValue(v)
     }
 
-    delete(key: string) {
+    del(key: string) {
         return this.put(key, undefined)
     }
 
@@ -133,8 +140,64 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         if (this.isDeleting || !this.path) return
         this.isDeleting = true
         await this.close()
-        await unlink(this.path)
+        await unlink(this.path).catch(() => {})
         await rm(this.folder,  { recursive: true, force: true })
+    }
+
+    size() {
+        return this.map.size
+    }
+
+    async *iterator(options: IteratorOptions={}) {
+        for (const k of this.keys(options))
+            yield [k, await this.get(k)]
+    }
+
+    *keys(options: IteratorOptions={}) {
+        for (const k of KvStorage.filterKeys(this.map.keys(), options))
+            yield k
+    }
+
+    protected static *filterKeys(keys: Iterable<string>, options: IteratorOptions={}) {
+        let { startsWith='', limit=Infinity } = options
+        for (const k of keys) {
+            if (!limit) return
+            if (!k.startsWith(startsWith)) continue
+            limit--
+            yield k
+        }
+    }
+
+    sublevel(prefix: string) {
+        prefix = prefix + KvStorage.subSeparator
+        const subKeys = new Set(this.keys({ startsWith: prefix }))
+        const ret = {
+            close: () => this.close,
+            flush: () => this.flush,
+            put: (key: string, value: Encodable) => {
+                subKeys.add(key)
+                this.put(prefix + key, value)
+            },
+            get: (key: string) => this.get(prefix + key),
+            del: (key: string) => {
+                subKeys.delete(key)
+                return this.del(prefix + key)
+            },
+            async unlink() {
+                for (const k of subKeys) await this.del(k)
+            },
+            size: () => subKeys.size,
+            *keys(options: IteratorOptions) {
+                for (const k of KvStorage.filterKeys(subKeys, options))
+                    yield k
+            },
+            async *iterator(options: IteratorOptions={}) {
+                for (const k of this.keys(options))
+                    yield [k, await this.get(k)]
+            },
+            sublevel: (prefix: string) => this.sublevel.call(ret, prefix),
+        }
+        return ret
     }
 
     // modifies the way the buffer is serialized, to be more efficient
@@ -147,13 +210,13 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return key.replace(FILE_DISALLOWED_CHARS, '').slice(0, 10)
     }
 
-    protected async readPart(v: MemoryValue) {
+    protected async readPartEncoded(v: MemoryValue) {
         return v?.size === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offset, end: v.offset! + v.size - 1 }))
     }
 
     // limited to 'ready' and 'part'
     protected async readValue(mv: MemoryValue) {
-        return mv?.v ?? this.readPart(mv)?.then(line =>
+        return mv?.v ?? this.readPartEncoded(mv)?.then(line =>
             (this.decode(line||'') as any)?.v)
     }
 
@@ -178,7 +241,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         for (const k of this.map.keys()) {
             const was = this.map.get(k)
             if (was === undefined) continue
-            const {offset} = await this.appendLine(await this.renderRecord(k, was))
+            const {offset} = await this.appendLine(await this.encodeRecord(k, was))
             if (was?.size)
                 was.offset = offset // just offset has changed
         }
@@ -231,9 +294,9 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         }
     }
 
-    protected async renderRecord(k: string, mv: MemoryValue, partWithSameKey=true) {
-        return partWithSameKey && await this.readPart(mv)
-            || JSON.stringify({ k, ...mv, v: await this.readValue(mv) })
+    protected async encodeRecord(k: string, mv: MemoryValue) {
+        return await this.readPartEncoded(mv) // part will keep same key. This is acceptable with current usage.
+            ?? JSON.stringify({ k, ...mv, v: await this.readValue(mv) })
     }
 
     protected async appendLine(line: string) {
@@ -255,6 +318,6 @@ function bufferJsonAsBase64(this: Buffer) {
     return { $KV$: 'Buffer', base64: this.toString('base64') }
 }
 
-function getUtf8Size(s: string) {
+export function getUtf8Size(s: string) {
     return Buffer.from(s).length
 }
