@@ -141,6 +141,10 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return this.put(key, undefined)
     }
 
+    has(key: string) {
+        return this.map.has(key)
+    }
+
     async unlink() {
         if (this.isDeleting || !this.path) return
         this.isDeleting = true
@@ -192,6 +196,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 for (const k of subKeys) await this.del(k)
             },
             size: () => subKeys.size,
+            has: (key: string) => subKeys.has(key),
             *keys(options: IteratorOptions) {
                 for (const k of KvStorage.filterKeys(subKeys, options))
                     yield k

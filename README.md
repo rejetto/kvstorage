@@ -61,9 +61,11 @@ where we say `any` below, we actually mean values that can be JSON-encoded (plus
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `get(key: string): Promise<any>`
 - `put(key: string, value: any): Promise<void>`
-    - await-ing this is optional, unless you need to know that the file has been written
+  - add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
 - `del(key: string): Promise<void>`
-    - await-ing this is optional, unless you need to know that the file has been written
+  - remove a value. Await-ing this is optional, unless you need to know that the file has been written.
+- `has(key: string): boolean`
+  - check for existence 
 - `size(): number`
   - Returns the number of key-value pairs stored.
 - `*iterator(options?): AsyncGenerator<[key, value]>`

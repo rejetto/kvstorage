@@ -1,6 +1,9 @@
 const { KvStorage } = require('.')
 
-test().catch(console.error)
+test().catch(e => {
+    console.error(e)
+    process.exit(1)
+})
 
 function assert(truth, msg) {
     if (!truth)
@@ -26,6 +29,8 @@ async function test() {
             db.del('delete')
             assert(db.size() === 2, "bad size")
             db.put('b', buf)
+            assert(db.has('b'), "has")
+            assert(!db.has('never'), "has")
             await db.put('jb', { buf })
             db.put('jb64', { buf: db.b64(buf) })
             db.put('k2', 22)
