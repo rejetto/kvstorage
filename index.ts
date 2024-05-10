@@ -93,7 +93,10 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         const was = this.map.get(key)
         if (!was?.file && !was?.offset && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
         const will: MemoryValue = { v: value }
-        this.map.set(key, will)
+        if (value === undefined)
+            this.map.delete(key)
+        else
+            this.map.set(key, will)
         return this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return
             const inMemoryNow = this.map.get(key)

@@ -24,6 +24,7 @@ async function test() {
             db.put('k2', 2)
             db.put('delete', 3)
             db.del('delete')
+            assert(db.size() === 2, "bad size")
             db.put('b', buf)
             await db.put('jb', { buf })
             db.put('jb64', { buf: db.b64(buf) })
