@@ -29,6 +29,7 @@ export interface KvStorageOptions {
     keyToFileName?: (key: string) => string
 }
 
+// actual form is { v } | { file, format? } | { offset, size }
 type MemoryValue = { v?: Encodable, file?: string, format?: 'json', offset?: number, size?: number }
     | undefined
 
@@ -91,12 +92,14 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         this.mustBeOpen()
         const was = this.map.get(key)
         if (!was?.file && !was?.offset && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
-        const will = { v: value } as const
+        const will: MemoryValue = { v: value }
         this.map.set(key, will)
         return this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return
+            const inMemoryNow = this.map.get(key)
+            if (inMemoryNow !== will) return // we were overwritten
             const {folder} = this
-            const oldFile = this.map.get(key)?.file // don't use `was` as an async writing could have happened in the meantime
+            const oldFile = inMemoryNow?.file // don't use `was` as an async writing could have happened in the meantime
             if (oldFile)
                 await unlink(join(folder, oldFile))
             const saveExternalFile = async (content: Buffer | string, format?: 'json') => {
@@ -116,7 +119,6 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             const encodeValue = (v: Encodable) => v === undefined ? '' : JSON.stringify(v)
             const encodedOldValue = await this.readPartEncoded(was) ?? encodeValue(was?.v)
             const encodedNewValue = encodeValue(value)
-            //return mv?.v ?? this.readPart(mv)?.then(line => this.decode(line||'')?.v)
             if (encodedNewValue === encodedOldValue) return
             if (encodedNewValue?.length! > this.fileThreshold)
                 return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
