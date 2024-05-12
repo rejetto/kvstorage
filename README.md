@@ -1,29 +1,46 @@
 # KvStorage
 
 - Persistent key-value storage
-- Node.js only (no browser)
+- Node.js only, 18.11+ (no browser)
 - API inspired by levelDB
 - All keys are kept in memory
 - Zero dependencies
 - Small bundle size (6KB minified)
+- Typescript + Javascript
 - Concurrency is not supported
 
-This class was designed to store mostly small data sets of JSON-able data types plus Buffer.
-Small values are kept in memory (configurable threshold), while big ones are loaded on-demand.
+This class was designed to store small/medium data sets of JSON-able data types plus Buffer,
+where you can have the luxury of keeping keys in memory.
+Small values are kept in memory as well (configurable threshold), while big ones are loaded on-demand.
+You can fine-tune this to match your memory-usage vs performance on reading.
 
 # File format
 
-Data is stored as a single text file, with each line a json, containing "k" property for they key, and "v" property for the value.
-Both new records and updates are appended.
+Data is stored as a single text file, with each line a json, containing "k" property for they key, 
+and "v" property for the value. 
+
+Both new records and updates are appended. If you delete a record, 
+then a json with only "k" is appended, so that the value is undefined.
+
 ```json
 {"k":"a","v":1}
 {"k":"b","v":2}
-{"k":"a","v":1.1}
+{"k":"a","v":1.1}  // this is an update
 {"k":"c","v":3}
+{"k":"b"}          // this is a deletion
 ```
-By default, values bigger than 10KB (configurable) are kept in a separate file, and instead of "v" you will find a "file" property, with the name of the file.
-If you delete a record, then a json with only "k" is appended, so that the value is undefined.
-Updates of existing keys cause wasted space, so the file is rewritten if enough percentage of wasted space is found on open.
+
+Comments are not part of the file, here just for clarity. The whole file is not a valid JSON, but each separate line is. 
+
+## File size
+Updates of existing keys cause wasted space, so the file is rewritten if enough
+percentage of wasted space (configurable) is found on open.
+
+By default, values bigger than 10KB (configurable) are kept in a separate file,
+and instead of "v" you will find a "file" property, with the name of the file.
+You can use this feature to
+- avoid your main file to grow too big
+- speed up initial loading
 
 # Buffer
 
@@ -82,7 +99,8 @@ where we say `any` below, we actually mean values that can be JSON-encoded (plus
   - Deletes the entire key-value store at its location.
 - `b64(Buffer): Buffer`
     - Modifies a Buffer object to be serialized efficiently in a JSON as base64, 2.6x smaller than default behavior.
+    - E.g. `db.put('someKey', db.b64(myBuffer) )`
 
 # Ideas
 
-- diff updates? if an object gets a change in a key, save the diff. Maybe save the key as array.
+- diff updates? if an object gets a change in a key, save the diff.
