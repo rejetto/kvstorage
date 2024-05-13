@@ -181,8 +181,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         prefix = prefix + KvStorage.subSeparator
         const subKeys = new Set(this.keys({ startsWith: prefix }))
         const ret = {
-            close: () => this.close,
-            flush: () => this.flush,
+            flush: () => this.flush(),
             put: (key: string, value: Encodable) => {
                 subKeys.add(key)
                 this.put(prefix + key, value)
