@@ -8,6 +8,7 @@
 - Small bundle size (6KB minified)
 - Typescript + Javascript
 - Concurrency is not supported
+- Throttled writings to file
 
 This class was designed to store small/medium data sets of JSON-able data types plus Buffer,
 where you can have the luxury of keeping keys in memory.
@@ -74,13 +75,16 @@ where we say `any` below, we actually mean values that can be JSON-encoded (plus
     - rewriteThreshold: Above this percentage (over the file size), a rewrite will be triggered at load time, to remove wasted space (default: 0.3).
     - rewriteOnOpen: Enable rewriteThreshold on open().
     - rewriteLater: Enable rewriteThreshold after open.
+    - defaultPutDelay: default value for `put(k,v,{delay})`.
+    - maxPutDelay: default value for `put(k,v,{maxDelay})`.
     - reviver: A function passed to JSON.parse for custom deserialization (optional).
     - keyToFileName: A function to customize the name of the files created by fileThreshold (optional).
 - `open(path: string): Promise<void>`
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `get(key: string): Promise<any>`
-- `put(key: string, value: any): Promise<void>`
+- `put(key: string, value: any, { delay, maxDelay }?): Promise<void>`
   - add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
+  - Adding a delay may save some writings for fast-changing values. 
 - `del(key: string): Promise<void>`
   - remove a value. Await-ing this is optional, unless you need to know that the file has been written.
 - `has(key: string): boolean`

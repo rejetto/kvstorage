@@ -72,28 +72,50 @@ async function test() {
             assert((await db.get('b'))?.toString('base64') === buf.toString('base64'), "buffer")
             assert((await db.get('jb'))?.buf?.toString('base64') === buf.toString('base64'), "json-buffer")
         })
+        const lastOften = await new Promise(res => {
+            const K = 'often'
+            let wrote = 0
+            db.on('wrote', ({ key }) => (key === K) && ++wrote) // count
+            let insteadOf = 0
+            const h = setInterval(() => db.put(K, ++insteadOf, { delay: 200, maxDelay: 1000 }), 100)
+            setTimeout(() => {
+                clearInterval(h)
+                assert(wrote === 2, `often ${wrote}/${insteadOf}`)
+                db.flush().then(() => res(insteadOf))
+            }, 1500)
+        })
+        const MUL = 1000
         await measure('write', async () => {
-            const MUL = 1000
             // these should not be written because overwritten
-            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "first" + i })
+            for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "first" + i })
 
-            for (let i = 0; i < MUL / 10; i++) db.put('b'+i, buf)
+            for (let i = 1; i <= MUL / 10; i++) db.put('b'+i, buf)
             db.put('b0', Buffer.from(buf)) // this should write because direct buffers are not checked for content
             db.del('b0')
-            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "second" + i })
+            for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "second" + i })
             await db.flush()
             // these should trigger rewrite
-            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "rewritten" + i })
+            for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "rewritten" + i })
             db.put('z', 1)
-            // these should trigger rewrite
-            await db.flush() // first write previous ones
-            for (let i = 0; i < MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
         })
+        await db.flush() // first write previous ones
+        await measure('rewrite', async () => {
+            // these should trigger rewrite
+            for (let i = 1; i <= MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
+        })
+
         await db.flush()
-        const finalSize = statSync(FN).size
-        assert(finalSize === 48_564, "final size")
         const content = readFileSync(FN)
+        assert(content.includes(`{"k":"often","v":${lastOften}`), 'lastOften')
+        assert(!content.includes('"b0"'), 'b0')
+        assert(content.includes(`{"k":"k1","v":"v1"}`), 'b100')
+        assert(content.includes(`{"k":"b100","file":"b100"}`), 'b100')
+        assert(content.includes(`{"k":"jb","file":"jb","format":"json"}`), 'jb')
+        assert(content.includes(`{"k":"o1","v":{"prop":"rewrittenAgain1"}}`), 'o0')
+        assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'o999')
         assert(content.includes('while-rewriting'), 'while-rewriting')
+        const finalSize = statSync(FN).size
+        assert(finalSize === 48_592, `final size ${finalSize}`)
         console.log('test done. Size: ', finalSize.toLocaleString())
     }
     finally {
