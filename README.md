@@ -34,7 +34,7 @@ Comments are not part of the file, here just for clarity. The whole file is not 
 
 ## File size
 Updates of existing keys cause wasted space, so the file is rewritten if enough
-percentage of wasted space (configurable) is found on open.
+percentage of wasted space (configurable) is found.
 
 By default, values bigger than 10KB (configurable) are kept in a separate file,
 and instead of "v" you will find a "file" property, with the name of the file.
@@ -72,6 +72,8 @@ where we say `any` below, we actually mean values that can be JSON-encoded (plus
     - memoryThreshold: Above this number of bytes, a record won't be kept in memory at load (default: 1000).
     - fileThreshold: Above this number of bytes, a record won't be kept in the main file (simple Buffers are saved as binaries) (default: 10000).
     - rewriteThreshold: Above this percentage (over the file size), a rewrite will be triggered at load time, to remove wasted space (default: 0.3).
+    - rewriteOnOpen: Enable rewriteThreshold on open().
+    - rewriteLater: Enable rewriteThreshold after open.
     - reviver: A function passed to JSON.parse for custom deserialization (optional).
     - keyToFileName: A function to customize the name of the files created by fileThreshold (optional).
 - `open(path: string): Promise<void>`

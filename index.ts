@@ -21,36 +21,47 @@ export interface KvStorageOptions {
     memoryThreshold?: number
     // above this number of bytes, record won't be kept in the main file (simple Buffer-s are saved as binaries)
     fileThreshold?: number
-    // above this percentage (over the file size), a rewrite will be triggered at load time, to remove wasted space
+    // above this percentage (over the file size), a rewrite will be triggered to remove wasted space
     rewriteThreshold?: number
+    // enable rewrite on open
+    rewriteOnOpen?: boolean
+    // enable rewrite after open
+    rewriteLater?: boolean
     // passed to JSON.parse
     reviver?: Reviver
     // in case you want to customize the name of the files created by fileThreshold
     keyToFileName?: (key: string) => string
 }
 
-// actual form is { v } | { file, format? } | { offset, size }
-type MemoryValue = { v?: Encodable, file?: string, format?: 'json', offset?: number, size?: number }
-    | undefined
+type MemoryValue = undefined | {
+    v?: Encodable, offset?: number, file?: string, // mutually exclusive fields: v=DirectValue, offset=OffloadedValue, file=ExternalFile
+    format?: 'json', // only for ExternalFile
+    size?: number, // bytes in the main file
+    w: MemoryValue,  // keep a reference to the record currently written on disk
+}
 
 type IteratorOptions = { startsWith?: string, limit?: number }
 
 // persistent key-value storage functionality with an API inspired by levelDB
 export class KvStorage extends EventEmitter implements KvStorageOptions {
-    map = new Map<string, MemoryValue>()
+    map = new Map<string, MemoryValue>() // a record exists in memory if it exists on disk
+    realSize = 0 // keep track of the actual size, since deleted keys are in memory until they are discarded from the disk as well
     path = ''
     folder = ''
     static subSeparator = ''
     isOpen = false
     isDeleting = false
     writeStream: WriteStream | undefined = undefined
-    fileSize = 0 // keep track to be able to make FilePart objects
+    fileSize = 0 // keep track to be able to make offloaded objects
     memoryThreshold = 1_000
     fileThreshold = 10_000
     rewriteThreshold = 0.3
+    rewriteOnOpen = true
+    rewriteLater = false
     wouldSave = 0 // keep track of how many bytes we would save by rewriting
     reviver?: Reviver
     lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
+    rewritePending: undefined | Promise<unknown> // keep track, to not issue more than one
     files = new Map<string, number>() // keep track of collision by base-filename
 
     constructor(options: KvStorageOptions={}) {
@@ -72,7 +83,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             await this.unlink().catch(() => {})
         this.isDeleting = false
         await this.load()
-        if (this.getWasted() > (this.rewriteThreshold || 1))
+        if (this.rewriteOnOpen && this.getWasted() > (this.rewriteThreshold || 1))
             await this.rewrite()
         this.writeStream = createWriteStream(this.path, { flags: 'a' })
         this.isOpen = true
@@ -86,24 +97,29 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     }
 
     flush() {
-        return this.lockWrite
+        let current: any
+        return current = this.lockWrite.then(() => {
+            if (this.lockWrite !== current) // more could happen in the meantime
+                return this.lockWrite
+        })
     }
 
     put(key: string, value: Encodable) {
         this.mustBeOpen()
         const was = this.map.get(key)
         if (!was?.file && !was?.offset && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
-        const will: MemoryValue = { v: value }
+        const will: MemoryValue = { v: value, w: was?.w } // keep reference to what's on disk
+        this.map.set(key, will)
         if (value === undefined)
-            this.map.delete(key)
-        else
-            this.map.set(key, will)
+            this.realSize--
+        else if (was?.v === undefined)
+            this.realSize++
         return this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return
             const inMemoryNow = this.map.get(key)
-            if (inMemoryNow !== will || !value && inMemoryNow) return // we were overwritten
+            if (inMemoryNow !== will) return // we were overwritten
             const {folder} = this
-            const oldFile = inMemoryNow?.file // don't use `was` as an async writing could have happened in the meantime
+            const oldFile = inMemoryNow?.w?.file // don't use `was` as an async writing could have happened in the meantime
             if (oldFile)
                 await unlink(join(folder, oldFile))
             const saveExternalFile = async (content: Buffer | string, format?: 'json') => {
@@ -113,29 +129,32 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 if (n) filename += FILE_COLLISION_SEPARATOR + n
                 await mkdir(folder).catch(() => {})
                 await writeFile(join(folder, filename), content)
-                const newRecord = { file: filename, format } as const
-                await this.appendRecord(key, newRecord, inMemoryNow)
-                this.map.set(key, newRecord)
+                const newRecord = { file: filename, format, w: inMemoryNow } as const
+                await this.appendRecord(key, newRecord)
+                this.map.set(key, newRecord) // offload
             }
             const isBuffer = value instanceof Buffer
             if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                 return saveExternalFile(value)
             const encodeValue = (v: Encodable) => v === undefined ? '' : JSON.stringify(v)
-            const encodedOldValue = await this.readPartEncoded(was) ?? encodeValue(was?.v)
+            const encodedOldValue = await this.readOffloadedEncoded(was) ?? encodeValue(was?.v)
             const encodedNewValue = encodeValue(value)
-            if (encodedNewValue === encodedOldValue) return
+            if (encodedNewValue === encodedOldValue) return // unchanged, don't save
             if (encodedNewValue?.length! > this.fileThreshold)
                 return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
                     : saveExternalFile(encodedNewValue!, 'json')
-            const { offset, size } = await this.appendRecord(key, will, inMemoryNow)
-            if (size > this.memoryThreshold) // once written, consider discarding from memory
-                this.map.set(key, { offset, size })
+            const { offset, size } = await this.appendRecord(key, will)
+            if (size > this.memoryThreshold) // once written, consider offloading
+                this.map.set(key, { offset, size, w: will.w })
         })
     }
 
     async get(key: string) {
-        const v = this.map.get(key)
-        return await this.readExternalFile(v) ?? await this.readValue(v)
+        const rec = this.map.get(key)
+        if (!rec) return
+        return await this.readExternalFile(rec) // if it is, it's surely not undefined
+            ?? await this.readOffloadedValue(rec)
+            ?? rec.v
     }
 
     del(key: string) {
@@ -155,7 +174,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     }
 
     size() {
-        return this.map.size
+        return this.realSize
     }
 
     async *iterator(options: IteratorOptions={}) {
@@ -220,13 +239,13 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return key.replace(FILE_DISALLOWED_CHARS, '').slice(0, 10)
     }
 
-    protected readPartEncoded(v: MemoryValue) {
+    protected readOffloadedEncoded(v: MemoryValue) {
         return v?.offset === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offset, end: v.offset + v.size! - 1 }))
     }
 
-    // limited to 'ready' and 'part'
-    protected async readValue(mv: MemoryValue) {
-        return mv?.v ?? this.readPartEncoded(mv)?.then(line =>
+    // limited to 'ready' and 'offloaded'
+    protected async readOffloadedValue(mv: MemoryValue) {
+        return this.readOffloadedEncoded(mv)?.then(line =>
             (this.decode(line||'') as any)?.v)
     }
 
@@ -241,36 +260,39 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             : stream2buffer(f)
     }
 
-    protected async rewrite() {
-        this.emit('rewrite')
-        const {path} = this
-        const randomId = Math.random().toString(36).slice(2, 5)
-        const rewriting = join(dirname(path), basename(path) + '-rewriting-' + randomId) // use same volume, to be sure we can rename to destination
-        this.writeStream = createWriteStream(rewriting, { flags: 'w' })
-        this.fileSize = 0
-        for (const k of this.map.keys()) {
-            const was = this.map.get(k)
-            if (was === undefined) continue
-            const {offset} = await this.appendRecord(k, was)
-            if (was?.size)
-                was.offset = offset // just offset has changed
-        }
-        await new Promise(res => this.writeStream!.close(res))
-        const deleting = path + '-deleting-' + randomId
-        await rename(path, deleting)
-        await rename(rewriting, path)
-        await unlink(deleting)
+    protected rewrite() {
+        return this.rewritePending ||= this.lockWrite = this.lockWrite.then(async () => {
+            this.emit('rewrite')
+            const {path} = this
+            const randomId = Math.random().toString(36).slice(2, 5)
+            const rewriting = join(dirname(path), basename(path) + '-rewriting-' + randomId) // use same volume, to be sure we can rename to destination
+            this.writeStream = createWriteStream(rewriting, { flags: 'w' })
+            this.fileSize = 0
+            this.wouldSave = 0
+            for (const k of this.map.keys()) {
+                const was = this.map.get(k)
+                if (was === undefined) continue
+                const {offset} = await this.appendRecord(k, was)
+                if (was?.size)
+                    was.offset = offset // just offset has changed
+            }
+            await new Promise(res => this.writeStream!.close(res))
+            const deleting = path + '-deleting-' + randomId
+            await rename(path, deleting)
+            await rename(rewriting, path)
+            await unlink(deleting)
+            this.rewritePending = undefined
+        })
     }
 
     protected async load() {
         try {
             const file = await open(this.path, 'r+')
             const {size} = await file.stat()
-            let filePos = 0 // track where we are, to make FilePart
+            let filePos = 0 // track where we are, to make Offloaded
             let nextFilePos = 0
             this.files.clear()
             this.wouldSave = 0 // calculate how much we'd save by rewriting
-            const lastSize = new Map<string, number>()
             for await (const line of file.readLines()) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
@@ -287,11 +309,13 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                     if (!was || n > was)
                         this.files.set(base, n)
                 }
-                this.wouldSave += lastSize.get(k) || 0
-                lastSize.set(k, lineBytes)
-                const mv: MemoryValue = file ? { file, format }
-                    : valueSize > this.memoryThreshold ? { offset: filePos, size: lineBytes }
-                    : { v }
+                this.wouldSave += this.map.get(k)?.size || 0
+                const mv: MemoryValue = {
+                    ...file ? { file, format } : valueSize > this.memoryThreshold ? { offset: filePos } : { v },
+                    size: lineBytes,
+                    w: undefined,
+                }
+                mv.w = mv // we are reading, so that's what's on disk
                 this.map.set(k, mv)
             }
             this.fileSize = size
@@ -304,19 +328,23 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     }
 
     protected async encodeRecord(k: string, mv: MemoryValue) {
-        return await this.readPartEncoded(mv) // part will keep same key. This is acceptable with current usage.
-            ?? JSON.stringify({ k, ...mv, v: await this.readValue(mv) }) // if it's not part, it's direct value or an external file
+        return await this.readOffloadedEncoded(mv) // offloaded will keep same key. This is acceptable with current usage.
+            ?? JSON.stringify({ k, ...mv, w: undefined, size: undefined }); // if it's not offloaded, it's DirectValue or ExternalFile
     }
 
-    protected async appendRecord(key: string, will: NonNullable<MemoryValue>, was?: MemoryValue) {
-        const line = await this.encodeRecord(key, will)
+    // NB: this must be called only from within a lockWrite
+    protected async appendRecord(key: string, mv: NonNullable<MemoryValue>) {
+        const line = await this.encodeRecord(key, mv)
         const res = await this.appendLine(line)
-        will.size = res.size
-        if (was) {
-            this.wouldSave += was?.size ?? 0
-            if (will && 'v' in will && will.v === undefined)
+        if (mv !== mv.w) {
+            this.wouldSave += mv.w?.size ?? 0
+            if (mv && 'v' in mv && mv.v === undefined)
                 this.wouldSave += res.size
+            if (this.rewriteLater && this.getWasted() > this.rewriteThreshold)
+                void this.rewrite()
         }
+        mv.size = res.size
+        mv.w = mv
         return res
     }
 

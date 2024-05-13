@@ -1,4 +1,6 @@
 const { KvStorage } = require('.')
+const { statSync } = require('node:fs')
+const { readFileSync } = require('fs')
 
 test().catch(e => {
     console.error(e)
@@ -17,7 +19,6 @@ async function test() {
     const buf = Buffer.from(bytes)
     const FN = 'test.db'
     let db = new KvStorage()
-    db.on('rewrite', () => console.log('rewrite'))
     try {
         await measure('basics', async () => {
             await db.open(FN, { clear: true })
@@ -59,7 +60,9 @@ async function test() {
             assert(await sub2.get('k under 2') === 21, "sub get")
             // reopen to check persistency
             await db.close()
-            db = new KvStorage()
+            db = new KvStorage({ rewriteLater: true })
+            db.on('rewrite', () => console.log('rewriting to save', db.wouldSave.toLocaleString()))
+            db.on('rewrite', () => db.put('while-rewriting', 1))
             await db.open(FN)
             assert(await db.get('k1') === 'v1', "put+get")
             assert(await db.get('k2') === 22, "numbers")
@@ -70,14 +73,28 @@ async function test() {
             assert((await db.get('jb'))?.buf?.toString('base64') === buf.toString('base64'), "json-buffer")
         })
         await measure('write', async () => {
-            const MUL = 100
-            for (let i = 0; i < 10 * MUL; i++) db.put('o'+i, { prop: Math.random() })
-            for (let i = 0; i < MUL; i++) db.put('b'+i, buf)
+            const MUL = 1000
+            // these should not be written because overwritten
+            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "first" + i })
+
+            for (let i = 0; i < MUL / 10; i++) db.put('b'+i, buf)
             db.put('b0', Buffer.from(buf)) // this should write because direct buffers are not checked for content
             db.del('b0')
-            db.put('z', true)
+            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "second" + i })
+            await db.flush()
+            // these should trigger rewrite
+            for (let i = 0; i < MUL; i++) db.put('o'+i, { prop: "rewritten" + i })
+            db.put('z', 1)
+            // these should trigger rewrite
+            await db.flush() // first write previous ones
+            for (let i = 0; i < MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
         })
-        console.log('test done')
+        await db.flush()
+        const finalSize = statSync(FN).size
+        assert(finalSize === 48_564, "final size")
+        const content = readFileSync(FN)
+        assert(content.includes('while-rewriting'), 'while-rewriting')
+        console.log('test done. Size: ', finalSize.toLocaleString())
     }
     finally {
         //db.unlink()
