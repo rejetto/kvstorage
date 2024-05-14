@@ -1,8 +1,9 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { open, unlink, rename, mkdir, writeFile, rm } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, rm } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { basename, dirname, join } from 'path'
 import { EventEmitter } from 'events'
+import readline from 'readline'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
 type JsonPrimitive = number | boolean | null | string
@@ -317,13 +318,12 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
 
     protected async load() {
         try {
-            const file = await open(this.path, 'r+')
-            const {size} = await file.stat()
+            const rl = readline.createInterface({ input: createReadStream(this.path) })
             let filePos = 0 // track where we are, to make Offloaded
             let nextFilePos = 0
             this.files.clear()
             this.wouldSave = 0 // calculate how much we'd save by rewriting
-            for await (const line of file.readLines()) {
+            for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
                 nextFilePos = filePos + lineBytes + 1 // +newline
@@ -348,7 +348,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 mv.w = mv // we are reading, so that's what's on disk
                 this.map.set(k, mv)
             }
-            this.fileSize = size
+            this.fileSize = nextFilePos
         }
         catch (e: any) {
             if (e?.code !== 'ENOENT') // silent on no-file

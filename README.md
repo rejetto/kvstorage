@@ -1,11 +1,11 @@
 # KvStorage
 
 - Persistent key-value storage
-- Node.js only, 18.11+ (no browser)
+- Node.js only, 16+ (no browser)
 - API inspired by levelDB
 - All keys are kept in memory
 - Zero dependencies
-- Small bundle size (6KB minified)
+- Small bundle size (7KB minified)
 - Typescript + Javascript
 - Concurrency is not supported
 - Throttled writings to file
@@ -34,8 +34,9 @@ then a json with only "k" is appended, so that the value is undefined.
 Comments are not part of the file, here just for clarity. The whole file is not a valid JSON, but each separate line is. 
 
 ## File size
-Updates of existing keys cause wasted space, so the file is rewritten if enough
-percentage of wasted space (configurable) is found.
+Updates of existing keys cause wasted space, so the file is rewritten when wasting a configurable percentage of space.
+You can limit this rewriting to load-time, if you don't want to risk performance degrading later.
+By delaying put()s you can reduce wasted space, in case same key is rewritten in the meantime. 
 
 By default, values bigger than 10KB (configurable) are kept in a separate file,
 and instead of "v" you will find a "file" property, with the name of the file.
@@ -66,7 +67,7 @@ setTimeout(async () => {
 
 ## Methods
 
-where we say `any` below, we actually mean values that can be JSON-encoded (plus Buffer)
+The `any` below actually means a value that can be JSON-encoded (plus Buffer).
 
 - `constructor(options?)`
   - options:
