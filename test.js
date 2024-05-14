@@ -84,7 +84,7 @@ async function test() {
                 db.flush().then(() => res(insteadOf))
             }, 1500)
         })
-        const MUL = 1000
+        const MUL = 10000
         await measure('write', async () => {
             // these should not be written because overwritten
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "first" + i })
@@ -104,8 +104,9 @@ async function test() {
             for (let i = 1; i <= MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
         })
 
-        await db.flush()
-        const content = readFileSync(FN)
+        await db.close()
+        await measure('read', () => db.open(FN)) // just a benchmark
+        const content = readFileSync(FN, 'utf-8')
         assert(content.includes(`{"k":"often","v":${lastOften}`), 'lastOften')
         assert(!content.includes('"b0"'), 'b0')
         assert(content.includes(`{"k":"k1","v":"v1"}`), 'b100')
@@ -115,7 +116,7 @@ async function test() {
         assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'o999')
         assert(content.includes('while-rewriting'), 'while-rewriting')
         const finalSize = statSync(FN).size
-        assert(finalSize === 48_592, `final size ${finalSize}`)
+        assert(finalSize === 504896, `final size ${finalSize}`)
         console.log('test done. Size: ', finalSize.toLocaleString())
     }
     finally {
