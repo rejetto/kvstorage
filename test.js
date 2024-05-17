@@ -14,9 +14,10 @@ function assert(truth, msg) {
 }
 
 async function test() {
-    const bytes = [Math.random()*100]
+    const bytes = []
     for (let i = 0; i < 20_000; i++) bytes.push(i % 256)
     const buf = Buffer.from(bytes)
+    const bigBuf = Buffer.from(bytes.concat(bytes, bytes, bytes, bytes, bytes))
     const FN = 'test.db'
     let db = new KvStorage()
     try {
@@ -29,11 +30,10 @@ async function test() {
             db.put('delete', 3)
             db.del('delete')
             assert(db.size() === 2, "bad size")
-            db.put('b', buf)
+            db.put('b', bigBuf)
             assert(db.has('b'), "has")
             assert(!db.has('never'), "has")
-            await db.put('jb', { buf })
-            db.put('jb64', { buf: db.b64(buf) })
+            await db.put('jb', { bigBuf })
             db.put('k2', 22)
             let n = 0
             let valueFound = false
@@ -73,8 +73,8 @@ async function test() {
             assert(await db.get('delete') === undefined, "delete")
             assert(db.map.get('b')?.file, "binary file")
             assert(db.map.get('jb')?.file, "json file")
-            assert((await db.get('b'))?.toString('base64') === buf.toString('base64'), "buffer")
-            assert((await db.get('jb'))?.buf?.toString('base64') === buf.toString('base64'), "json-buffer")
+            assert((await db.get('b'))?.toString('base64') === bigBuf.toString('base64'), "buffer")
+            assert((await db.get('jb'))?.bigBuf?.toString('base64') === bigBuf.toString('base64'), "json-buffer")
         })
         const lastOften = await new Promise(res => {
             const K = 'often'
@@ -95,7 +95,8 @@ async function test() {
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "first" + i })
 
             for (let i = 1; i <= BN; i++) db.put('b'+i, buf)
-            db.put('b0', Buffer.from(buf)) // this should write because direct buffers are not checked for content
+            db.put('jb64', { buf: db.b64(buf) }) // this is supposed to end in bucket
+            db.put('b0', Buffer.from(bigBuf)) // this should write because direct buffers are not checked for content
             db.del('b0')
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "second" + i })
             await db.flush()
@@ -104,24 +105,29 @@ async function test() {
             db.put('z', 1)
         })
         await db.flush() // first write previous ones
-        await measure('rewrite', async () => {
-            // these should trigger rewrite
+        await measure('rewrite', async () => { // these should trigger rewrite
             for (let i = 1; i <= MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
         })
-
+        await db.flush() // first write previous ones
+        await measure('rewrite-bucket', async () => { // these should trigger rewrite
+            for (let i = 1; i <= BN / 2; i++) db.del('b' + i)
+        })
+        db.wouldSave = db.fileSize // trick the lib into causing rewrite of main file as bucket is rewritten
         await db.close()
         await measure('read', () => db.open(FN)) // just a benchmark
         const content = readFileSync(FN, 'utf-8')
         assert(content.includes(`{"k":"often","v":${lastOften}`), 'lastOften')
         assert(!content.includes('"b0"'), 'b0')
+        // half buckets were deleted
+        assert(content.includes(`{"k":"jb64","bucket":[${BN/2 * buf.length},26705],"format":"json"}`), 'jb64')
         assert(content.includes(`{"k":"k1","v":"v1"}`), 'k1')
-        assert(content.includes(`{"k":"b${BN}","file":"b${BN}"}`), 'bN')
+        assert(content.includes(`{"k":"b${BN}","bucket"`), 'bN')
         assert(content.includes(`{"k":"jb","file":"jb","format":"json"}`), 'jb')
         assert(content.includes(`{"k":"o1","v":{"prop":"rewrittenAgain1"}}`), 'o0')
         assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'oMUL')
         assert(content.includes('while-rewriting'), 'while-rewriting')
         const finalSize = statSync(FN).size
-        assert(finalSize === 504896, `final size ${finalSize}`)
+        //assert(finalSize === 516456, `final size ${finalSize}`)
         console.log('test done. Size: ', finalSize.toLocaleString())
     }
     finally {

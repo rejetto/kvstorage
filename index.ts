@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { unlink, rename, mkdir, writeFile, rm } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { join } from 'path'
 import { EventEmitter } from 'events'
@@ -20,6 +20,8 @@ if (!FILE_DISALLOWED_CHARS.test(FILE_COLLISION_SEPARATOR)) throw "bad choice"
 export interface KvStorageOptions {
     // above this number of bytes, value won't be kept in memory, just key
     memoryThreshold?: number
+    // above this number of bytes, value will be kept in a common bucket file (simple Buffer-s are saved as binaries)
+    bucketThreshold?: number
     // above this number of bytes, value will be kept in a dedicated file (simple Buffer-s are saved as binaries)
     fileThreshold?: number
     // above this percentage (over the file size), a rewrite will be triggered to remove wasted space
@@ -37,8 +39,8 @@ export interface KvStorageOptions {
 }
 
 type MemoryValue = {
-    v?: Encodable, offset?: number, file?: string, // mutually exclusive fields: v=DirectValue, offset=OffloadedValue, file=ExternalFile
-    format?: 'json', // only for ExternalFile
+    v?: Encodable, offloaded?: number, bucket?: [number, number], file?: string, // mutually exclusive fields: v=DirectValue, offloaded=OffloadedValue, bucket=BucketValue, file=ExternalFile
+    format?: 'json', // only for ExternalFile and BucketValue
     size?: number, // bytes in the main file
     waited?: number
     w?: MemoryValue,  // keep a reference to the record currently written on disk
@@ -56,15 +58,21 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     protected isOpen = false
     protected isDeleting = false
     protected fileStream: WriteStream | undefined = undefined
+    protected bucketStream: WriteStream | undefined = undefined
     protected fileSize = 0 // keep track to be able to make offloaded objects
+    protected bucketSize = 0
     memoryThreshold = 1_000
-    fileThreshold = 10_000
+    bucketThreshold = 10_000
+    fileThreshold = 100_000 // this has precedence over bucket
     rewriteThreshold = 0.3
     rewriteOnOpen = true
     rewriteLater = false
+    dontWriteSameValue = true // not effective in case of fileThreshold
     defaultPutDelay = 0
     maxPutDelay = 10_000
     wouldSave = 0 // keep track of how many bytes we would save by rewriting
+    bucketWouldSave = 0
+    bucketPath = ''
     reviver?: Reviver
     protected lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
     protected lockFlush: Promise<unknown> = Promise.resolve() // used to account also for delayed writings
@@ -77,9 +85,9 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         Object.assign(this, options)
         this.reviver = (k,v) => options.reviver ? options.reviver(k,v)
             : v?.$KV$ === 'Buffer' ? Buffer.from(v.base64, 'base64')
-            // detect standard serialized buffer
-            : v?.type === 'Buffer' && Object.keys(v).length === 2 && Array.isArray(v.data) ? Buffer.from(v.data)
-            : v
+                // detect standard serialized buffer
+                : v?.type === 'Buffer' && Object.keys(v).length === 2 && Array.isArray(v.data) ? Buffer.from(v.data)
+                    : v
     }
 
     async open(path: string, { clear=false }={}) {
@@ -87,6 +95,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             throw "cannot open twice"
         this.path = path
         this.folder = path + '$'
+        this.bucketPath = path + '-bucket'
         if (clear)
             await this.unlink().catch(() => {})
         this.isDeleting = false
@@ -104,12 +113,12 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         this.map.clear()
     }
 
-    flush() {
+    flush(): typeof this.lockFlush {
         this.emit('flush')
-        let current: any
-        return current = this.lockFlush.then(async () => {
+        const current = this.lockFlush
+        return current.then(() => {
             if (this.lockFlush !== current) // more could happen in the meantime
-                await this.lockFlush
+                return this.flush()
         })
     }
 
@@ -117,7 +126,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         if (!this.isOpen)
             throw "storage must be open first"
         const was = this.map.get(key)
-        if (!was?.file && !was?.offset && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
+        if (!was?.file && !was?.offloaded && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
         const will: MemoryValue = { v: value, w: was?.w, waited: was?.waited } // keep reference to what's on disk
         this.map.set(key, will)
         if (value === undefined)
@@ -153,15 +162,22 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                 return saveExternalFile(value)
             const encodeValue = (v: Encodable) => v === undefined ? '' : JSON.stringify(v)
-            const encodedOldValue = await this.readOffloadedEncoded(was) ?? encodeValue(was?.v)
+            const encodedOldValue = this.dontWriteSameValue && (
+                await this.readOffloadedEncoded(was) ?? await this.readBucketEncoded(was) ?? encodeValue(was?.v) )
+            if (isBuffer && value.length > this.bucketThreshold)
+                // optimized bucket-buffer comparison
+                return this.dontWriteSameValue && was?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
+                    || this.appendBucket(key, value)
             const encodedNewValue = encodeValue(value)
-            if (encodedNewValue === encodedOldValue) return // unchanged, don't save
+            if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
             if (encodedNewValue?.length! > this.fileThreshold)
                 return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
                     : saveExternalFile(encodedNewValue!, 'json')
+            if (encodedNewValue?.length! > this.bucketThreshold)
+                return this.appendBucket(key, encodedNewValue)
             const { offset, size } = await this.appendRecord(key, will)
             if (size > this.memoryThreshold) // once written, consider offloading
-                this.map.set(key, { offset, size, w: will.w })
+                this.map.set(key, { offloaded: offset, size, w: will.w })
         }))
     }
 
@@ -186,6 +202,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         this.isDeleting = true
         await this.close()
         await unlink(this.path).catch(() => {})
+        await unlink(this.bucketPath).catch(() => {})
         await rm(this.folder,  { recursive: true, force: true })
     }
 
@@ -269,8 +286,15 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         })
     }
 
+    protected readBucketEncoded(v: MemoryValue | undefined) {
+        if (!v?.bucket) return
+        const [o,n] = v.bucket
+        const stream = createReadStream(this.bucketPath, { start: o, end: o + n - 1 })
+        return v.format === 'json' ? stream2string(stream) : stream2buffer(stream)
+    }
+
     protected readOffloadedEncoded(v: MemoryValue | undefined) {
-        return v?.offset === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offset, end: v.offset + v.size! - 1 }))
+        return v?.offloaded === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offloaded, end: v.offloaded + v.size! - 1 }))
     }
 
     // limited to 'ready' and 'offloaded'
@@ -290,7 +314,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             : stream2buffer(f)
     }
 
-    protected rewrite() {
+    rewrite() {
         return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewrite')
             const {path} = this
@@ -304,12 +328,46 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 if (!mv || 'v' in mv && mv.v === undefined || !mv.w) continue // no value, or not written yet
                 const {offset} = await this.appendRecord(k, mv, true)
                 if (mv?.size)
-                    mv.offset = offset // just offset has changed
+                    mv.offloaded = offset // just offset has changed
             }
             await unlink(path)
             await rename(rewriting, path)
             this.rewritePending = undefined
             void this.flush()
+        })
+    }
+
+    rewriteBucket() {
+        return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
+            this.emit('rewriteBucket')
+            const {bucketPath: path} = this
+            const randomId = Math.random().toString(36).slice(2, 5)
+            const rewriting = path + '-rewriting-' + randomId // use same volume, to be sure we can rename to destination
+            const f = createWriteStream(rewriting, { flags: 'w' })
+            let lastWrite: any
+            let ofs = 0
+            const newMap = new Map(this.map)
+            for (const [k, mv] of this.map.entries()) {
+                const encoded = await this.readBucketEncoded(mv)
+                if (!encoded) continue
+                lastWrite = new Promise(res => f.write(encoded, res))
+                const size = mv!.bucket![1]
+                const rec: MemoryValue = { bucket: [ofs, size], format: mv!.format }
+                rec.w = rec
+                newMap.set(k, rec)
+                ofs += size
+            }
+            await lastWrite
+            for (const [k, v] of newMap.entries())
+                if (v.bucket)
+                    await this.appendRecord(k, v)
+            await unlink(path)
+            await rename(rewriting, path)
+            this.map = newMap
+            this.bucketStream = f
+            this.bucketSize = ofs
+            this.bucketWouldSave = 0
+            this.rewritePending = undefined
         })
     }
 
@@ -328,7 +386,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 if (typeof record?.k !== 'string') continue // malformed
                 const wrapSize = getUtf8Size(record.k) + 13 // `{"k":"","v":}`.length
                 const valueSize = lineBytes - wrapSize
-                const {k, v, file, format} = record
+                const {k, v, file, format, bucket } = record
                 if (file) { // rebuild this.files
                     let [base, n] = file.split(FILE_COLLISION_SEPARATOR)
                     const was = this.files.get(base)
@@ -338,7 +396,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 }
                 this.wouldSave += this.map.get(k)?.size || 0
                 const mv: MemoryValue = {
-                    ...file ? { file, format } : valueSize > this.memoryThreshold ? { offset: filePos } : { v },
+                    ...file ? { file, format } : bucket ? { bucket, format } : valueSize > this.memoryThreshold ? { offset: filePos } : { v },
                     size: lineBytes,
                     w: undefined,
                 }
@@ -368,6 +426,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             this.wouldSave += mv.w?.size ?? 0
             if (mv && 'v' in mv && mv.v === undefined)
                 this.wouldSave += res.size
+            this.bucketWouldSave += this.map.get(key)?.w?.bucket?.[1] ?? 0
             if (this.rewriteLater)
                 void this.considerRewrite()
         }
@@ -381,6 +440,8 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         if (!this.rewriteThreshold) return
         if (this.wouldSave / this.fileSize > this.rewriteThreshold)
             await this.rewrite()
+        if (this.bucketWouldSave / this.bucketSize > this.rewriteThreshold)
+            await this.rewriteBucket()
     }
 
     protected async appendLine(line: string) {
@@ -389,6 +450,22 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         this.fileSize += size + 1 // newline
         await new Promise(res => this.fileStream!.write(line + '\n', res))
         return { offset, size }
+    }
+
+    async appendBucket(key: string, what: string | Buffer) {
+        this.bucketSize ||= await stat(this.bucketPath).then(x => x.size, () => 0)
+        this.bucketStream ||= createWriteStream(this.bucketPath, { flags: 'a' })
+        await new Promise(res => this.bucketStream!.write(what, res))
+        const isString = typeof what === 'string'
+        const size = isString ? getUtf8Size(what) : what.length
+        const rec: MemoryValue = {
+            bucket: [this.bucketSize, size],
+            format: isString ? 'json' : undefined,
+            w: undefined
+        }
+        this.bucketSize += size
+        await this.appendRecord(key, rec)
+        this.map.set(key, rec)
     }
 
 }

@@ -5,7 +5,7 @@
 - API inspired by levelDB
 - All keys are kept in memory
 - Zero dependencies
-- Small bundle size (7KB minified)
+- Small bundle size (9KB minified)
 - Typescript + Javascript
 - Concurrency is not supported
 - Throttled writings to file
@@ -72,7 +72,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
 - `constructor(options?)`
   - options:
     - memoryThreshold: Above this number of bytes, a record won't be kept in memory at load (default: 1000).
-    - fileThreshold: Above this number of bytes, a record won't be kept in the main file (simple Buffers are saved as binaries) (default: 10000).
+    - bucketThreshold: Above this number of bytes, a record will be stored in a separate but common file, called bucket (simple Buffers are saved as binaries) (default: 10000).
+    - fileThreshold: Above this number of bytes, a record will be stored in a dedicated file (simple Buffers are saved as binaries) (default: 100000).
     - rewriteThreshold: Above this percentage (over the file size), a rewrite will be triggered at load time, to remove wasted space (default: 0.3).
     - rewriteOnOpen: Enable rewriteThreshold on open().
     - rewriteLater: Enable rewriteThreshold after open.
