@@ -36,7 +36,7 @@ export interface KvStorageOptions {
     defaultPutDelay?: number
 }
 
-type MemoryValue = undefined | {
+type MemoryValue = {
     v?: Encodable, offset?: number, file?: string, // mutually exclusive fields: v=DirectValue, offset=OffloadedValue, file=ExternalFile
     format?: 'json', // only for ExternalFile
     size?: number, // bytes in the main file
@@ -269,7 +269,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         })
     }
 
-    protected readOffloadedEncoded(v: MemoryValue) {
+    protected readOffloadedEncoded(v: MemoryValue | undefined) {
         return v?.offset === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offset, end: v.offset + v.size! - 1 }))
     }
 
@@ -291,7 +291,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     }
 
     protected rewrite() {
-        return this.rewritePending ||= this.lockWrite = this.lockWrite.then(async () => {
+        return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewrite')
             const {path} = this
             const randomId = Math.random().toString(36).slice(2, 5)
