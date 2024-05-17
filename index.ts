@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
 import { unlink, rename, mkdir, writeFile, rm } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
-import { basename, dirname, join } from 'path'
+import { join } from 'path'
 import { EventEmitter } from 'events'
 import readline from 'readline'
 
@@ -18,9 +18,9 @@ const FILE_COLLISION_SEPARATOR = '$' // must not match \w
 if (!FILE_DISALLOWED_CHARS.test(FILE_COLLISION_SEPARATOR)) throw "bad choice"
 
 export interface KvStorageOptions {
-    // above this number of bytes, record won't be kept in memory at load
+    // above this number of bytes, value won't be kept in memory, just key
     memoryThreshold?: number
-    // above this number of bytes, record won't be kept in the main file (simple Buffer-s are saved as binaries)
+    // above this number of bytes, value will be kept in a dedicated file (simple Buffer-s are saved as binaries)
     fileThreshold?: number
     // above this percentage (over the file size), a rewrite will be triggered to remove wasted space
     rewriteThreshold?: number
@@ -41,7 +41,7 @@ type MemoryValue = undefined | {
     format?: 'json', // only for ExternalFile
     size?: number, // bytes in the main file
     waited?: number
-    w: MemoryValue,  // keep a reference to the record currently written on disk
+    w?: MemoryValue,  // keep a reference to the record currently written on disk
 }
 
 type IteratorOptions = { startsWith?: string, limit?: number }
@@ -49,13 +49,13 @@ type IteratorOptions = { startsWith?: string, limit?: number }
 // persistent key-value storage functionality with an API inspired by levelDB
 export class KvStorage extends EventEmitter implements KvStorageOptions {
     protected map = new Map<string, MemoryValue>() // a record exists in memory if it exists on disk
-    protected realSize = 0 // keep track of the actual size, since deleted keys are in memory until they are discarded from the disk as well
+    protected realSize = 0 // keep track of the actual number of keys, since deleted keys are in memory until they are discarded from the disk as well
     protected path = ''
     protected folder = ''
     static subSeparator = ''
     protected isOpen = false
     protected isDeleting = false
-    protected writeStream: WriteStream | undefined = undefined
+    protected fileStream: WriteStream | undefined = undefined
     protected fileSize = 0 // keep track to be able to make offloaded objects
     memoryThreshold = 1_000
     fileThreshold = 10_000
@@ -91,15 +91,15 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             await this.unlink().catch(() => {})
         this.isDeleting = false
         await this.load()
-        if (this.rewriteOnOpen && this.getWasted() > (this.rewriteThreshold || 1))
-            await this.rewrite()
-        this.writeStream = createWriteStream(this.path, { flags: 'a' })
+        if (this.rewriteOnOpen)
+            await this.considerRewrite()
+        this.fileStream ||= createWriteStream(this.path, { flags: 'a' })
         this.isOpen = true
     }
 
     async close() {
         await this.flush()
-        this.writeStream = undefined
+        this.fileStream = undefined
         this.isOpen = false
         this.map.clear()
     }
@@ -295,22 +295,19 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             this.emit('rewrite')
             const {path} = this
             const randomId = Math.random().toString(36).slice(2, 5)
-            const rewriting = join(dirname(path), basename(path) + '-rewriting-' + randomId) // use same volume, to be sure we can rename to destination
-            this.writeStream = createWriteStream(rewriting, { flags: 'w' })
+            const rewriting = path + '-rewriting-' + randomId // use same volume, to be sure we can rename to destination
+            this.fileStream = createWriteStream(rewriting, { flags: 'w' })
             this.fileSize = 0
             this.wouldSave = 0
             for (const k of this.map.keys()) {
                 const mv = this.map.get(k)
-                if (mv === undefined || 'v' in mv && mv.v === undefined) continue
+                if (!mv || 'v' in mv && mv.v === undefined || !mv.w) continue // no value, or not written yet
                 const {offset} = await this.appendRecord(k, mv, true)
                 if (mv?.size)
                     mv.offset = offset // just offset has changed
             }
-            await new Promise(res => this.writeStream!.close(res))
-            const deleting = path + '-deleting-' + randomId
-            await rename(path, deleting)
+            await unlink(path)
             await rename(rewriting, path)
-            await unlink(deleting)
             this.rewritePending = undefined
             void this.flush()
         })
@@ -371,8 +368,8 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             this.wouldSave += mv.w?.size ?? 0
             if (mv && 'v' in mv && mv.v === undefined)
                 this.wouldSave += res.size
-            if (this.rewriteLater && this.getWasted() > this.rewriteThreshold)
-                void this.rewrite()
+            if (this.rewriteLater)
+                void this.considerRewrite()
         }
         mv.waited = undefined // reset
         mv.size = res.size
@@ -380,17 +377,20 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         return res
     }
 
+    protected async considerRewrite() {
+        if (!this.rewriteThreshold) return
+        if (this.wouldSave / this.fileSize > this.rewriteThreshold)
+            await this.rewrite()
+    }
+
     protected async appendLine(line: string) {
         const offset = this.fileSize
         const size = getUtf8Size(line)
         this.fileSize += size + 1 // newline
-        await new Promise(res => this.writeStream!.write(line + '\n', res))
+        await new Promise(res => this.fileStream!.write(line + '\n', res))
         return { offset, size }
     }
 
-    getWasted() {
-        return this.wouldSave / this.fileSize
-    }
 }
 
 // 2.6x more efficient on storage space (on average) than Buffer's default

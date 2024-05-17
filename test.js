@@ -61,8 +61,12 @@ async function test() {
             // reopen to check persistency
             await db.close()
             db = new KvStorage({ rewriteLater: true })
-            db.on('rewrite', () => console.log('rewriting to save', db.wouldSave.toLocaleString()))
-            db.on('rewrite', () => db.put('while-rewriting', 1))
+            db.on('rewrite', () => {
+                console.log('rewriting to save', db.wouldSave.toLocaleString())
+                db.put('while-rewriting', 1) //TODO this is being written twice
+            })
+            db.on('rewriteBucket', () =>
+                console.log('rewriting bucket to save', db.bucketWouldSave.toLocaleString()))
             await db.open(FN)
             assert(await db.get('k1') === 'v1', "put+get")
             assert(await db.get('k2') === 22, "numbers")
@@ -85,11 +89,12 @@ async function test() {
             }, 1500)
         })
         const MUL = 10000
+        const BN = MUL / 10
         await measure('write', async () => {
             // these should not be written because overwritten
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "first" + i })
 
-            for (let i = 1; i <= MUL / 10; i++) db.put('b'+i, buf)
+            for (let i = 1; i <= BN; i++) db.put('b'+i, buf)
             db.put('b0', Buffer.from(buf)) // this should write because direct buffers are not checked for content
             db.del('b0')
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "second" + i })
@@ -109,11 +114,11 @@ async function test() {
         const content = readFileSync(FN, 'utf-8')
         assert(content.includes(`{"k":"often","v":${lastOften}`), 'lastOften')
         assert(!content.includes('"b0"'), 'b0')
-        assert(content.includes(`{"k":"k1","v":"v1"}`), 'b100')
-        assert(content.includes(`{"k":"b100","file":"b100"}`), 'b100')
+        assert(content.includes(`{"k":"k1","v":"v1"}`), 'k1')
+        assert(content.includes(`{"k":"b${BN}","file":"b${BN}"}`), 'bN')
         assert(content.includes(`{"k":"jb","file":"jb","format":"json"}`), 'jb')
         assert(content.includes(`{"k":"o1","v":{"prop":"rewrittenAgain1"}}`), 'o0')
-        assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'o999')
+        assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'oMUL')
         assert(content.includes('while-rewriting'), 'while-rewriting')
         const finalSize = statSync(FN).size
         assert(finalSize === 504896, `final size ${finalSize}`)
