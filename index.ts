@@ -13,8 +13,6 @@ type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 type Encodable = undefined | Jsonable<Buffer>
 type Reviver = (k: string, v: any) => any
 
-const FILE_DISALLOWED_CHARS = /[^\w./]/g
-
 export interface KvStorageOptions {
     // above this number of bytes, value won't be kept in memory, just key
     memoryThreshold?: number
@@ -269,7 +267,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     }
 
     keyToFileName(key: string) {
-        return key.replace(FILE_DISALLOWED_CHARS, '').slice(0, 10)
+        return key.replace(/[^\w./]/g, '').slice(0, 10) || 'f'
     }
 
     protected wait(t: number) {
