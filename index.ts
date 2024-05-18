@@ -7,10 +7,10 @@ import readline from 'readline'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
 type JsonPrimitive = number | boolean | null | string
-type JsonObject<EXPAND> = { [key: string]: Jsonable<EXPAND> }
+type JsonObject<EXPAND> = { [key: string]: Jsonable<EXPAND> | undefined } // don't complain for undefined-s that will not saved
 type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 
-type Encodable = undefined | Jsonable<Buffer>
+type Encodable = undefined | Jsonable<Buffer | Date>
 type Reviver = (k: string, v: any) => any
 
 export interface KvStorageOptions {
