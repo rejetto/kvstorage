@@ -38,11 +38,19 @@ Updates of existing keys cause wasted space, so the file is rewritten when wasti
 You can limit this rewriting to load-time, if you don't want to risk performance degrading later.
 By delaying put()s you can reduce wasted space, in case same key is rewritten in the meantime. 
 
-By default, values bigger than 10KB (configurable) are kept in a separate file,
-and instead of "v" you will find a "file" property, with the name of the file.
-You can use this feature to
-- avoid your main file to grow too big
-- speed up initial loading
+To keep the main file small and keep operations fast, we have 2 mechanisms:
+
+- bucket file
+
+  the bucket file is a common file that store big values (by default is >10KB), while the key stays in the main file.
+  In the main file, instead of "v" you will find a "bucket" property, with coordinates inside the bucket file.
+  
+- dedicated files 
+
+  By default, values bigger than 100KB (configurable) are kept in a separate file, while the key stays in the main file  
+  together with a "file" property with the relative path of the file. All these files are kept in a folder.
+
+This is all transparent to you, just keep using `get` and `put` without worrying.
 
 # Buffer
 
