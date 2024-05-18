@@ -80,7 +80,7 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
     - defaultPutDelay: default value for `put(k,v,{delay})`.
     - maxPutDelay: default value for `put(k,v,{maxDelay})`.
     - reviver: A function passed to JSON.parse for custom deserialization (optional).
-    - keyToFileName: A function to customize the name of the files created by fileThreshold (optional).
+    - keyToFileName: A function to customize the name of the files created by fileThreshold (optional). Including path-separator(s) in the name you can divide files in subfolders.
 - `open(path: string): Promise<void>`
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `get(key: string): Promise<any>`

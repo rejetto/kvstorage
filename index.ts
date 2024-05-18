@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
 import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { EventEmitter } from 'events'
 import readline from 'readline'
 
@@ -13,9 +13,7 @@ type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 type Encodable = undefined | Jsonable<Buffer>
 type Reviver = (k: string, v: any) => any
 
-const FILE_DISALLOWED_CHARS = /[^\w\.]/g
-const FILE_COLLISION_SEPARATOR = '$' // must not match \w
-if (!FILE_DISALLOWED_CHARS.test(FILE_COLLISION_SEPARATOR)) throw "bad choice"
+const FILE_DISALLOWED_CHARS = /[^\w./]/g
 
 export interface KvStorageOptions {
     // above this number of bytes, value won't be kept in memory, just key
@@ -73,11 +71,12 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     wouldSave = 0 // keep track of how many bytes we would save by rewriting
     bucketWouldSave = 0
     bucketPath = ''
+    fileCollisionSeparator = '~' // must not be one of the chars used in keyToFileName
     reviver?: Reviver
     protected lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
     protected lockFlush: Promise<unknown> = Promise.resolve() // used to account also for delayed writings
     protected rewritePending: undefined | Promise<unknown> // keep track, to not issue more than one
-    protected files = new Map<string, number>() // keep track of collision by base-filename
+    protected files = new Map<string, number>() // keep track of collision by base-filename, and produce unique filename in the same time of a get+set
 
     constructor(options: KvStorageOptions={}) {
         super()
@@ -151,9 +150,10 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 let filename = this.keyToFileName(key)
                 const n = this.files.get(filename)
                 this.files.set(filename, (n || 0) + 1)
-                if (n) filename += FILE_COLLISION_SEPARATOR + n
-                await mkdir(folder).catch(() => {})
-                await writeFile(join(folder, filename), content)
+                if (n) filename += this.fileCollisionSeparator + n
+                const fullPath = join(folder, filename)
+                await mkdir(dirname(fullPath), { recursive: true })
+                await writeFile(fullPath, content)
                 const newRecord = { file: filename, format, w: inMemoryNow } as const
                 await this.appendRecord(key, newRecord)
                 this.map.set(key, newRecord) // offload
@@ -388,7 +388,8 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
                 const valueSize = lineBytes - wrapSize
                 const {k, v, file, format, bucket } = record
                 if (file) { // rebuild this.files
-                    let [base, n] = file.split(FILE_COLLISION_SEPARATOR)
+                    // we don't rely in using current keyToFileName, as we allow having used a different one in the past
+                    let [base, n] = file.split(this.fileCollisionSeparator)
                     const was = this.files.get(base)
                     n = Number(n) || 0
                     if (!was || n > was)

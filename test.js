@@ -1,6 +1,7 @@
 const { KvStorage } = require('.')
 const { statSync } = require('node:fs')
 const { readFileSync } = require('fs')
+const { join } = require('path')
 
 test().catch(e => {
     console.error(e)
@@ -20,6 +21,11 @@ async function test() {
     const bigBuf = Buffer.from(bytes.concat(bytes, bytes, bytes, bytes, bytes))
     const FN = 'test.db'
     let db = new KvStorage()
+    const original = db.keyToFileName
+    db.keyToFileName = k => {
+        const x = original(k)
+        return join(x[0], x)
+    }
     try {
         await measure('basics', async () => {
             await db.open(FN, { clear: true })
@@ -47,14 +53,15 @@ async function test() {
             sub1.put('k under 1', 11)
             sub1.put('k2 under 1', 2)
             sub1.put('k2 under 1', 12)
-            assert(await db.get(`P1${KvStorage.subSeparator}k under 1`), "sub from above")
+            const sep = KvStorage.subSeparator
+            assert(await db.get(`P1${sep}k under 1`), "sub from above")
             assert(await sub1.get('k under 1'), "sub from inside")
             assert(sub1.size() === 2, "sub size")
             assert(Array.from(sub1.keys()).length === 2, "sub length")
             const sub2 = sub1.sublevel('P2')
             sub2.put('k under 2', 21)
             sub2.put('k2 under 2', 22)
-            assert(await db.get(`P1${KvStorage.subSeparator}P2${KvStorage.subSeparator}k under 2`), "sub2 from above")
+            assert(await db.get(`P1${sep}P2${sep}k under 2`), "sub2 from above")
             assert(sub1.size() === 4, "sub father size")
             assert(sub2.size() === 2, "sub child size")
             assert(await sub2.get('k under 2') === 21, "sub get")
@@ -64,6 +71,8 @@ async function test() {
             db.on('rewrite', () => {
                 console.log('rewriting to save', db.wouldSave.toLocaleString())
                 db.put('while-rewriting', 1) //TODO this is being written twice
+                const t = Date.now()
+                db.lockFlush.then(() => console.log('rewrite finished in', Date.now() - t, 'ms'))
             })
             db.on('rewriteBucket', () =>
                 console.log('rewriting bucket to save', db.bucketWouldSave.toLocaleString()))
@@ -104,16 +113,18 @@ async function test() {
             for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "rewritten" + i })
             db.put('z', 1)
         })
-        await db.flush() // first write previous ones
-        await measure('rewrite', async () => { // these should trigger rewrite
+        await measure('flush', () => db.flush()) // first write previous ones
+        await measure('put+rewrite', async () => { // these should trigger rewrite
+           // time here is both for put-s and the triggered rewrite
             for (let i = 1; i <= MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })
+            await db.flush() // first write previous ones
         })
-        await db.flush() // first write previous ones
         await measure('rewrite-bucket', async () => { // these should trigger rewrite
             for (let i = 1; i <= BN / 2; i++) db.del('b' + i)
+            //db.wouldSave = db.fileSize // trick the lib into causing rewrite of main file as bucket is rewritten
+            await db.flush()
         })
-        db.wouldSave = db.fileSize // trick the lib into causing rewrite of main file as bucket is rewritten
-        await db.close()
+        await measure('close', () => db.close())
         await measure('read', () => db.open(FN)) // just a benchmark
         const content = readFileSync(FN, 'utf-8')
         assert(content.includes(`{"k":"often","v":${lastOften}`), 'lastOften')
@@ -122,7 +133,7 @@ async function test() {
         assert(content.includes(`{"k":"jb64","bucket":[${BN/2 * buf.length},26705],"format":"json"}`), 'jb64')
         assert(content.includes(`{"k":"k1","v":"v1"}`), 'k1')
         assert(content.includes(`{"k":"b${BN}","bucket"`), 'bN')
-        assert(content.includes(`{"k":"jb","file":"jb","format":"json"}`), 'jb')
+        assert(content.includes(`{"k":"jb","file":"j/jb","format":"json"}`), 'jb')
         assert(content.includes(`{"k":"o1","v":{"prop":"rewrittenAgain1"}}`), 'o0')
         assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'oMUL')
         assert(content.includes('while-rewriting'), 'while-rewriting')
@@ -136,8 +147,8 @@ async function test() {
 }
 
 async function measure(label, cb) {
-    console.log('start', label)
-    console.time(label)
+    console.log('START', label)
+    const t = Date.now()
     await cb()
-    console.timeEnd(label)
+    console.log('FINISHED', label, Date.now() - t, 'ms')
 }
