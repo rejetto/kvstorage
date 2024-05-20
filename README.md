@@ -92,6 +92,9 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
 - `open(path: string): Promise<void>`
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `get(key: string): Promise<any>`
+  - Get the value associated with the key, or undefined if not present.
+- `getSync(key: string): any`
+  - Like get, but works only with values that are not offloaded, that are those smaller the memoryThreshold and bucketThreshold and fileThreshold.
 - `put(key: string, value: any, { delay, maxDelay }?): Promise<void>`
   - add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
   - Adding a delay may save some writings for fast-changing values. 

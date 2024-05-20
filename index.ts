@@ -189,6 +189,11 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
             ?? rec.v
     }
 
+    // for sync use-cases
+    getSync(key: string) {
+        return this.map.get(key)?.v
+    }
+
     del(key: string) {
         return this.put(key, undefined)
     }
