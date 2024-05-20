@@ -5,12 +5,12 @@
 - API inspired by levelDB
 - All keys are kept in memory
 - Zero dependencies
-- Small bundle size (9KB minified)
+- Small bundle size (10KB minified)
 - Typescript + Javascript
 - Concurrency is not supported
 - Throttled writings to file
 
-This class was designed to store small/medium data sets of JSON-able data types plus Buffer,
+This class was designed to store small/medium data sets of JSON-able data types plus Date and Buffer,
 where you can have the luxury of keeping keys in memory.
 Small values are kept in memory as well (configurable threshold), while big ones are loaded on-demand.
 You can fine-tune this to match your memory-usage vs performance on reading.
@@ -75,7 +75,7 @@ setTimeout(async () => {
 
 ## Methods
 
-The `any` below actually means a value that can be JSON-encoded (plus Buffer).
+The `any` below actually means a value that can be JSON-encoded (plus Date and Buffer).
 
 - `constructor(options?)`
   - options:
@@ -121,9 +121,6 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
   - Deletes the entire key-value store at its location.
 - `clear(): Promise<void>`
   - Equivalent to unlink + open. 
-- `b64(Buffer): Buffer`
-    - Modifies a Buffer object to be serialized efficiently in a JSON as base64, 2.6x smaller than default behavior.
-    - E.g. `db.put('someKey', db.b64(myBuffer) )`
 
 # Ideas
 

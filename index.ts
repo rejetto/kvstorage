@@ -12,6 +12,7 @@ type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 
 type Encodable = undefined | Jsonable<Buffer | Date>
 type Reviver = (k: string, v: any) => any
+type Encoder = (k: string | undefined, v: any, skip: object) => any
 
 export interface KvStorageOptions {
     // above this number of bytes, value won't be kept in memory, just key
@@ -28,6 +29,10 @@ export interface KvStorageOptions {
     rewriteLater?: boolean
     // passed to JSON.parse
     reviver?: Reviver
+    // passed to JSON.stringify
+    encoder?: Encoder
+    // should encoder recur in array entries
+    digArrays?: boolean
     // in case you want to customize the name of the files created by fileThreshold
     keyToFileName?: (key: string) => string
     // default delay before writing to file
@@ -76,6 +81,8 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     bucketPath = ''
     fileCollisionSeparator = '~' // must not be one of the chars used in keyToFileName
     reviver?: Reviver
+    encoder?: Encoder
+    digArrays = false
     protected lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
     protected lockFlush: Promise<unknown> = Promise.resolve() // used to account also for delayed writings
     protected rewritePending: undefined | Promise<unknown> // keep track, to not issue more than one
@@ -85,10 +92,9 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         super()
         this.setMaxListeners(Infinity) // we may need one for every key
         Object.assign(this, options)
-        this.reviver = (k,v) => options.reviver ? options.reviver(k,v)
+        this.reviver = (k, v) => options.reviver ? options.reviver(k,v)
             : v?.$KV$ === 'Buffer' ? Buffer.from(v.base64, 'base64')
-                // detect standard serialized buffer
-                : v?.type === 'Buffer' && Object.keys(v).length === 2 && Array.isArray(v.data) ? Buffer.from(v.data)
+                : v?.$KV$ === 'Date' ? new Date(v.date)
                     : v
     }
 
@@ -168,7 +174,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             const isBuffer = value instanceof Buffer
             if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                 return saveExternalFile(value)
-            const encodeValue = (v: T | undefined) => v === undefined ? '' : JSON.stringify(v)
+            const encodeValue = (v: T | undefined) => v === undefined ? '' : this.encode(v)
             const encodedOldValue = this.dontWriteSameValue && (
                 await this.readOffloadedEncoded(was) ?? await this.readBucketEncoded(was) ?? encodeValue(was?.v) )
             if (isBuffer && value.length > this.bucketThreshold)
@@ -272,12 +278,6 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             sublevel: (prefix: string) => this.sublevel.call(ret, prefix),
         }
         return ret
-    }
-
-    // modifies the way the buffer is serialized, to be more efficient
-    b64(b: Buffer) {
-        b.toJSON = bufferJsonAsBase64 as any // ts complains because returned object has different form
-        return b
     }
 
     keyToFileName(key: string) {
@@ -427,7 +427,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
 
     protected async encodeRecord(k: string, mv: MemoryValue<T>) {
         return await this.readOffloadedEncoded(mv) // offloaded will keep same key. This is acceptable with current usage.
-            ?? JSON.stringify({ k, ...mv, w: undefined, waited: undefined, size: undefined }); // if it's not offloaded, it's DirectValue or ExternalFile
+            ?? this.encode({ k, ...mv, w: undefined, waited: undefined, size: undefined }, 'v' in mv) // if it's not offloaded, it's DirectValue or ExternalFile
     }
 
     // NB: this must be called only from within a lockWrite
@@ -457,6 +457,45 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             await this.rewriteBucket()
     }
 
+    protected encode(v: any, useEncoder=true) {
+        if (useEncoder) {
+            const skip = Object(false) // a unique value to skip recursion at this point
+            const self = this
+            v = (function recur(x, k?: string) {
+                if (self.encoder) {
+                    const res = self.encoder?.(k, x, skip)
+                    if (res === skip) return x
+                    x = res
+                }
+                if (!x) return x
+                // the classes we encode internally
+                if (x instanceof Buffer)
+                    return { $KV$: 'Buffer', base64: x.toString('base64') } // base64 is 2.6x more efficient on storage space (on average) than Buffer's default
+                if (x instanceof Date)
+                    return { $KV$: 'Date', date: x.toJSON() }
+                const array = self.digArrays && Array.isArray(x)
+                if (x.constructor !== Object && !array)
+                    return x
+                // lazy shallow-clone
+                let ret = x
+                for (const [k, v] of Object.entries(x)) {
+                    if (typeof k === 'symbol') continue
+                    const res = recur(v, k)
+                    if (ret === x) {
+                        if (res === v) continue
+                        ret = array ? [] : {}
+                        for (const [pk, pv] of Object.entries(x)) // copy previous entries
+                            if (pk === k) break
+                            else ret[pk] = pv
+                    }
+                    ret[k] = res
+                }
+                return ret
+            })(v)
+        }
+        return JSON.stringify(v)
+    }
+
     protected async appendLine(line: string) {
         const offset = this.fileSize
         const size = getUtf8Size(line)
@@ -481,11 +520,6 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         this.map.set(key, rec)
     }
 
-}
-
-// 2.6x more efficient on storage space (on average) than Buffer's default
-function bufferJsonAsBase64(this: Buffer) {
-    return { $KV$: 'Buffer', base64: this.toString('base64') }
 }
 
 export function getUtf8Size(s: string) {
