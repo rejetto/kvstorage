@@ -113,6 +113,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
   - Flushes any pending writes to disk.
 - `unlink(): Promise<void>`
   - Deletes the entire key-value store at its location.
+- `clear(): Promise<void>`
+  - Equivalent to unlink + open. 
 - `b64(Buffer): Buffer`
     - Modifies a Buffer object to be serialized efficiently in a JSON as base64, 2.6x smaller than default behavior.
     - E.g. `db.put('someKey', db.b64(myBuffer) )`

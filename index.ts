@@ -113,10 +113,12 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     flush(): typeof this.lockFlush {
         this.emit('flush')
         const current = this.lockFlush
-        return current.then(() => {
-            if (this.lockFlush !== current) // more could happen in the meantime
-                return this.flush()
-        })
+        return current.then(() => this.lockFlush === current || this.flush()) // more could happen in the meantime
+    }
+
+    async clear() {
+        await this.unlink()
+        await this.open(this.path)
     }
 
     put(key: string, value: Encodable, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay }={}) {
