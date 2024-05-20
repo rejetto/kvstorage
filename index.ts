@@ -32,6 +32,10 @@ export interface KvStorageOptions {
     keyToFileName?: (key: string) => string
     // default delay before writing to file
     defaultPutDelay?: number
+    // limit put-delay to avoid indefinite extension, since the delay resets with each put for the same key
+    maxPutDelay?: number
+    // override put delay for missing keys, or keys that weren't written to disk yet
+    maxPutDelayCreate?: number
 }
 
 type MemoryValue = {
@@ -66,6 +70,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
     dontWriteSameValue = true // not effective in case of fileThreshold
     defaultPutDelay = 0
     maxPutDelay = 10_000
+    maxPutDelayCreate?: number
     wouldSave = 0 // keep track of how many bytes we would save by rewriting
     bucketWouldSave = 0
     bucketPath = ''
@@ -121,7 +126,7 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         await this.open(this.path)
     }
 
-    put(key: string, value: Encodable, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay }={}) {
+    put(key: string, value: Encodable, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
         if (!this.isOpen)
             throw "storage must be open first"
         const was = this.map.get(key)
@@ -133,6 +138,8 @@ export class KvStorage extends EventEmitter implements KvStorageOptions {
         else if (was?.v === undefined)
             this.realSize++
         const start = Date.now()
+        if (!was?.w || was?.v === undefined) // maxDelayCreate applies both to values never written and missing values
+            maxDelay = maxDelayCreate ?? maxDelay
         const toWait = Math.max(0, Math.min(delay, maxDelay - (was?.waited || 0)))
         return this.lockFlush = this.wait(toWait).then(() => this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return

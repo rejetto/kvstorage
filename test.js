@@ -90,10 +90,10 @@ async function test() {
             let wrote = 0
             db.on('wrote', ({ key }) => (key === K) && ++wrote) // count
             let insteadOf = 0
-            const h = setInterval(() => db.put(K, ++insteadOf, { delay: 200, maxDelay: 1000 }), 100)
+            const h = setInterval(() => db.put(K, ++insteadOf, { delay: 200, maxDelay: 1000, maxDelayCreate: 0 }), 100)
             setTimeout(() => {
                 clearInterval(h)
-                assert(wrote === 2, `often ${wrote}/${insteadOf}`)
+                assert(wrote === 3, `often ${wrote}/${insteadOf}`)
                 db.flush().then(() => res(insteadOf))
             }, 1500)
         })

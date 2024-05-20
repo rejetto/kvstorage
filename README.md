@@ -87,6 +87,7 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
     - rewriteLater: Enable rewriteThreshold after open.
     - defaultPutDelay: default value for `put(k,v,{delay})`.
     - maxPutDelay: default value for `put(k,v,{maxDelay})`.
+    - maxPutDelayCreate: default value for `put(k,v,{maxDelayCreate})`.
     - reviver: A function passed to JSON.parse for custom deserialization (optional).
     - keyToFileName: A function to customize the name of the files created by fileThreshold (optional). Including path-separator(s) in the name you can divide files in subfolders.
 - `open(path: string): Promise<void>`
@@ -95,9 +96,11 @@ The `any` below actually means a value that can be JSON-encoded (plus Buffer).
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`
   - Like get, but works only with values that are not offloaded, that are those smaller the memoryThreshold and bucketThreshold and fileThreshold.
-- `put(key: string, value: any, { delay, maxDelay }?): Promise<void>`
+- `put(key: string, value: any, { delay, maxDelay, maxDelayCreate }?): Promise<void>`
   - add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
-  - Adding a delay may save some writings for fast-changing values. 
+  - Adding a delay may save some writings for fast-changing values. Since the delay is renewed at each put, we can put a
+    limit to that, and can have a generic limit with `maxDelay` or one specific for keys that weren't written to disk yet,
+    as you may care more about the existence of a (persisted) record than its updates. 
 - `del(key: string): Promise<void>`
   - remove a value. Await-ing this is optional, unless you need to know that the file has been written.
 - `has(key: string): boolean`
