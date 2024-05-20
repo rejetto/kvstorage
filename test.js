@@ -138,7 +138,7 @@ async function test() {
         assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'oMUL')
         assert(content.includes('while-rewriting'), 'while-rewriting')
         const finalSize = statSync(FN).size
-        //assert(finalSize === 516456, `final size ${finalSize}`)
+        assert(finalSize === 541849, `final size ${finalSize}`)
         console.log('test done. Size: ', finalSize.toLocaleString())
     }
     finally {
