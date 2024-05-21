@@ -2,7 +2,7 @@ import { createReadStream, createWriteStream, WriteStream } from 'fs'
 import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { dirname, join } from 'path'
-import { EventEmitter } from 'events'
+import { EventEmitter, once } from 'events'
 import readline from 'readline'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
@@ -112,6 +112,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             await this.considerRewrite()
         this.fileStream ||= createWriteStream(this.path, { flags: 'a' })
         this.isOpen = true
+        this.emit('open')
     }
 
     async close() {
@@ -246,6 +247,23 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             limit--
             yield k
         }
+    }
+
+    singleSync<ST extends T>(key: string, def?: ST) {
+        const self = this
+        const ret = {
+            ready: async () => self.isOpen || once(self, 'open'),
+            get: () => self.getSync(key) as ST,
+            set(v: ST | ((was: ST) => ST)) {
+                if (v instanceof Function)
+                    v = v(this.get())
+                self.put(key, v)
+                return v
+            },
+        }
+        if (def !== undefined)
+            ret.ready().then(() => ret.set(x => x ?? def))
+        return ret
     }
 
     sublevel(prefix: string) {
