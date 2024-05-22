@@ -121,6 +121,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Deletes the entire key-value store at its location.
 - `clear(): Promise<void>`
   - Equivalent to unlink + open.
+- `asObject(): Promise<Object>`
+  -  make all keys and values into a simple Object.
 - `singleSync(key: string, def?: any): { get, set, ready }`
   - Make a simple object-api where you can get and set a value of key without passing it as parameter, and in a sync way.
     Be sure to use this only with values that will not exceed any threshold that will cause it to be offloaded.  

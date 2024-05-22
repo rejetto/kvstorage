@@ -266,6 +266,13 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         return ret
     }
 
+    async asObject() {
+        const ret: any = {}
+        for await (const [k, v] of this.iterator())
+            ret[k] = v
+        return ret
+    }
+
     sublevel(prefix: string) {
         prefix = prefix + KvStorage.subSeparator
         const subKeys = new Set(this.keys({ startsWith: prefix }))
@@ -518,13 +525,15 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         const offset = this.fileSize
         const size = getUtf8Size(line)
         this.fileSize += size + 1 // newline
+        this.emit('write', line)
         await new Promise(res => this.fileStream!.write(line + '\n', res))
         return { offset, size }
     }
 
-    async appendBucket(key: string, what: string | Buffer) {
+    protected async appendBucket(key: string, what: string | Buffer) {
         this.bucketSize ||= await stat(this.bucketPath).then(x => x.size, () => 0)
         this.bucketStream ||= createWriteStream(this.bucketPath, { flags: 'a' })
+        this.emit('writeBucket', what)
         await new Promise(res => this.bucketStream!.write(what, res))
         const isString = typeof what === 'string'
         const size = isString ? getUtf8Size(what) : what.length
