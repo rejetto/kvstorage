@@ -150,6 +150,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         const toWait = Math.max(0, Math.min(delay, maxDelay - (was?.waited || 0)))
         return this.lockFlush = this.wait(toWait).then(() => this.lockWrite = this.lockWrite.then(async () => {
             if (this.isDeleting) return
+            if (will.w === will) return // wrote by a rewrite
             const inMemoryNow = this.map.get(key)
             if (inMemoryNow !== will) { // we were overwritten
                 if (inMemoryNow && delay) // keep track of the time already waited on the same key
@@ -175,12 +176,14 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             const isBuffer = value instanceof Buffer
             if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                 return saveExternalFile(value)
+            // compare with value currently on disk
             const encodeValue = (v: T | undefined) => v === undefined ? '' : this.encode(v)
+            const {w} = will
             const encodedOldValue = this.dontWriteSameValue && (
-                await this.readOffloadedEncoded(was) ?? await this.readBucketEncoded(was) ?? encodeValue(was?.v) )
+                await this.readOffloadedEncoded(w) ?? await this.readBucketEncoded(w) ?? encodeValue(w?.v) )
             if (isBuffer && value.length > this.bucketThreshold)
                 // optimized bucket-buffer comparison
-                return this.dontWriteSameValue && was?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
+                return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
                     || this.appendBucket(key, value)
             const encodedNewValue = encodeValue(value)
             if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
