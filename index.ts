@@ -86,6 +86,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     protected lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
     protected lockFlush: Promise<unknown> = Promise.resolve() // used to account also for delayed writings
     protected rewritePending: undefined | Promise<unknown> // keep track, to not issue more than one
+    protected rewriteBucketPending: undefined | Promise<unknown> // keep track, to not issue more than one
     protected files = new Map<string, number>() // keep track of collision by base-filename, and produce unique filename in the same time of a get+set
 
     constructor(options: KvStorageOptions={}) {
@@ -124,7 +125,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
 
     flush(): typeof this.lockFlush {
         this.emit('flush')
-        const current = this.lockFlush
+        const current = this.lockFlush // wait lockFlush, because a write may have been delayed and only then lockWrite will be set
         return current.then(() => this.lockFlush === current || this.flush()) // more could happen in the meantime
     }
 
@@ -356,7 +357,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
 
     rewrite() {
         return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
-            this.emit('rewrite')
+            this.emit('rewrite', this.rewritePending)
             const {path} = this
             const randomId = Math.random().toString(36).slice(2, 5)
             const rewriting = path + '-rewriting-' + randomId // use same volume, to be sure we can rename to destination
@@ -378,7 +379,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     }
 
     rewriteBucket() {
-        return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
+        return this.rewriteBucketPending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewriteBucket')
             const {bucketPath: path} = this
             const randomId = Math.random().toString(36).slice(2, 5)
