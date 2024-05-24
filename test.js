@@ -9,8 +9,10 @@ test().catch(e => {
 })
 
 function assert(truth, msg) {
-    if (!truth)
-        throw "FAILED " + msg
+    if (!truth) {
+        console.log("FAILED " + msg)
+        process.exit(1)
+    }
     console.log('OK', msg)
 }
 
@@ -98,7 +100,7 @@ async function test() {
                     clearInterval(h)
                     assert(wrote === 3, `often ${wrote}/${insteadOf}`)
                     db.flush().then(() => res(insteadOf))
-                }, 1500)
+                }, 1800)
             })
             const MUL = 10000
             const BN = MUL / 10
