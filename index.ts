@@ -7,7 +7,7 @@ import readline from 'readline'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
 type JsonPrimitive = number | boolean | null | string
-type JsonObject<EXPAND> = { [key: string]: Jsonable<EXPAND> | undefined } // don't complain for undefined-s that will not saved
+type JsonObject<EXPAND> = { [key: string]: Jsonable<EXPAND> | undefined } // don't complain about undefined-s that won't be saved
 type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 
 type Encodable = undefined | Jsonable<Buffer | Date>
@@ -113,7 +113,8 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         await this.load()
         if (this.rewriteOnOpen)
             await this.considerRewrite()
-        this.fileStream ||= createWriteStream(this.path, { flags: 'a' })
+        this.fileStream ??= createWriteStream(this.path, { flags: 'a' })
+        await streamReady(this.fileStream)
         this._isOpen = true
         this.emit('open')
     }
@@ -319,13 +320,13 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         return new Promise<void>(resolve => {
             if (t <= 0) return resolve()
             let h: any
-            const cb = () => {
+            const cleanStop = () => {
                 clearTimeout(h)
-                this.removeListener('flush', cb)
+                this.removeListener('flush', cleanStop)
                 resolve()
             }
-            h = setTimeout(cb, t)
-            this.on('flush', cb)
+            h = setTimeout(cleanStop, t)
+            this.on('flush', cleanStop)
         })
     }
 
@@ -337,7 +338,8 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     }
 
     protected readOffloadedEncoded(v: MemoryValue<T> | undefined) {
-        return v?.offloaded === undefined ? undefined : stream2string(createReadStream(this.path, { start: v.offloaded, end: v.offloaded + v.size! - 1 }))
+        return v?.offloaded === undefined ? undefined
+            : stream2string(createReadStream(this.path, { start: v.offloaded, end: v.offloaded + v.size! - 1 }))
     }
 
     // limited to 'ready' and 'offloaded'
@@ -361,8 +363,9 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewrite', this.rewritePending)
             const {path} = this
-            const randomId = Math.random().toString(36).slice(2, 5)
-            const rewriting = path + '-rewriting-' + randomId // use same volume, to be sure we can rename to destination
+            const rewriting = path + '-rewriting-' + randomId() // use same volume, to be sure we can rename to destination
+            if (this.fileStream?.writable)
+                await new Promise(res => this.fileStream?.close(res))
             this.fileStream = createWriteStream(rewriting, { flags: 'w' })
             this.fileSize = 0
             this.wouldSave = 0
@@ -373,8 +376,8 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
                 if (mv?.size)
                     mv.offloaded = offset // just offset has changed
             }
-            await unlink(path)
-            await rename(rewriting, path)
+            await streamReady(this.fileStream)
+            await replaceFile(path, rewriting)
             this.rewritePending = undefined
             void this.flush()
         })
@@ -384,16 +387,16 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         return this.rewriteBucketPending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewriteBucket')
             const {bucketPath: path} = this
-            const randomId = Math.random().toString(36).slice(2, 5)
-            const rewriting = path + '-rewriting-' + randomId // use same volume, to be sure we can rename to destination
-            const f = createWriteStream(rewriting, { flags: 'w' })
+            const rewriting = path + '-rewriting-' + randomId() // use same volume, to be sure we can rename to destination
+            let f: typeof this.bucketStream
             let lastWrite: any
             let ofs = 0
             const newMap = new Map(this.map)
             for (const [k, mv] of this.map.entries()) {
                 const encoded = await this.readBucketEncoded(mv)
                 if (!encoded) continue
-                lastWrite = new Promise(res => f.write(encoded, res))
+                f ??= createWriteStream(rewriting, { flags: 'w' })
+                lastWrite = new Promise(res => f!.write(encoded, res))
                 const size = mv!.bucket![1]
                 const rec: MemoryValue<T> = { bucket: [ofs, size], format: mv!.format }
                 rec.w = rec
@@ -404,8 +407,12 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
             for (const [k, v] of newMap.entries())
                 if (v.bucket)
                     await this.appendRecord(k, v)
-            await unlink(path)
-            await rename(rewriting, path)
+            if (!f) // empty
+                await unlink(path)
+            else {
+                await streamReady(f)
+                await replaceFile(path, rewriting)
+            }
             this.map = newMap
             this.bucketStream = f
             this.bucketSize = ofs
@@ -510,7 +517,6 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
                 // lazy shallow-clone
                 let ret = x
                 for (const [k, v] of Object.entries(x)) {
-                    if (typeof k === 'symbol') continue
                     const res = recur(v, k)
                     if (ret === x) {
                         if (res === v) continue
@@ -557,4 +563,22 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
 
 export function getUtf8Size(s: string) {
     return Buffer.from(s).length
+}
+
+const IS_WINDOWS = process.platform === 'win32'
+async function replaceFile(old: string, new_: string) {
+    if (IS_WINDOWS) { // workaround, see https://github.com/nodejs/node/issues/29481
+        const add = '-win-' + randomId()
+        await rename(old, old + add) // in my tests, unlinking is not enough, and I get EPERM error anyway
+        await unlink(old + add)
+    }
+    await rename(new_, old)
+}
+
+function randomId() {
+    return Math.random().toString(36).slice(2, 5)
+}
+
+function streamReady(s: WriteStream) {
+    return s.pending && once(s, 'ready')
 }

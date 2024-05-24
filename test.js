@@ -1,6 +1,6 @@
 const { KvStorage } = require('.')
 const { statSync } = require('node:fs')
-const { readFileSync } = require('fs')
+const { readFileSync, readdirSync } = require('fs')
 const { join } = require('path')
 
 test().catch(e => {
@@ -32,6 +32,7 @@ async function test() {
         await measure('all', async () => {
             await measure('basics', async () => {
                 await db.open(FN, { clear: true })
+                assert(db.isOpen(), "isOpen")
                 assert(db.size() === 0, "empty")
                 db.put('k1', 'v1')
                 assert(await db.get('k1') === 'v1', "no-await")
@@ -80,6 +81,7 @@ async function test() {
                 })
                 db.on('rewriteBucket', () =>
                     console.log('rewriting bucket to save', db.bucketWouldSave.toLocaleString()))
+                assert(! readdirSync('.').filter(x => x.startsWith(FN + '-win-')).length, "rewrite leftovers") // these would accumulate in time (until process exit)
                 await db.open(FN)
                 assert(await db.get('k1') === 'v1', "put+get")
                 assert(await db.get('k2') === 22, "numbers")
@@ -138,12 +140,16 @@ async function test() {
             assert(content.includes(`{"k":"jb64","bucket":[${BN/2 * buf.length},26705],"format":"json"}`), 'jb64')
             assert(content.includes(`{"k":"k1","v":"v1"}`), 'k1')
             assert(content.includes(`{"k":"b${BN}","bucket"`), 'bN')
-            assert(content.includes(`{"k":"jb","file":"j/jb","format":"json"}`), 'jb')
+            const jbPath = JSON.stringify(join('j', 'jb'))
+            assert(content.includes(`{"k":"jb","file":${jbPath},"format":"json"}`), 'jb')
             assert(content.includes(`{"k":"o1","v":{"prop":"rewrittenAgain1"}}`), 'o0')
             assert(content.includes(`{"k":"o${MUL}","v":{"prop":"rewrittenAgain${MUL}"}}`), 'oMUL')
             assert(content.includes('while-rewriting'), 'while-rewriting')
+            let extra = 0
+            for (const v of db.map.values())
+                extra += v.file?.match(/\\/g)?.length || 0 // this path separator uses 1 extra byte once encoded
             const finalSize = statSync(FN).size
-            assert(finalSize === 541896, `final size ${finalSize}`)
+            assert(finalSize === 541896 + extra, `final size ${finalSize}`)
             console.log('final size: ', finalSize.toLocaleString())
         })
     }
