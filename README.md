@@ -92,6 +92,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
     - keyToFileName: A function to customize the name of the files created by fileThreshold (optional). Including path-separator(s) in the name you can divide files in subfolders.
 - `open(path: string): Promise<void>`
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
+- `isOpen(): boolean`
+  - Current status.
 - `get(key: string): Promise<any>`
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`

@@ -60,7 +60,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     protected path = ''
     protected folder = ''
     static subSeparator = ''
-    protected isOpen = false
+    protected _isOpen = false
     protected isDeleting = false
     protected fileStream: WriteStream | undefined = undefined
     protected bucketStream: WriteStream | undefined = undefined
@@ -99,8 +99,10 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
                     : v
     }
 
+    isOpen() { return this._isOpen }
+
     async open(path: string, { clear=false }={}) {
-        if (this.isOpen)
+        if (this._isOpen)
             throw "cannot open twice"
         this.path = path
         this.folder = path + '$'
@@ -112,14 +114,14 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         if (this.rewriteOnOpen)
             await this.considerRewrite()
         this.fileStream ||= createWriteStream(this.path, { flags: 'a' })
-        this.isOpen = true
+        this._isOpen = true
         this.emit('open')
     }
 
     async close() {
         await this.flush()
         this.fileStream = undefined
-        this.isOpen = false
+        this._isOpen = false
         this.map.clear()
     }
 
@@ -135,7 +137,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     }
 
     put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
-        if (!this.isOpen)
+        if (!this._isOpen)
             throw "storage must be open first"
         const was = this.map.get(key)
         if (!was?.file && !was?.offloaded && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
@@ -256,7 +258,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     singleSync<ST extends T>(key: string, def?: ST) {
         const self = this
         const ret = {
-            ready: async () => self.isOpen || once(self, 'open'),
+            ready: async () => self._isOpen || once(self, 'open'),
             get: () => self.getSync(key) as ST,
             set(v: ST | ((was: ST) => ST)) {
                 if (v instanceof Function)
