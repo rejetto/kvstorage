@@ -14,35 +14,6 @@ type Encodable = undefined | Jsonable<Buffer | Date>
 type Reviver = (k: string, v: any) => any
 type Encoder = (k: string | undefined, v: any, skip: object) => any
 
-export interface KvStorageOptions {
-    // above this number of bytes, value won't be kept in memory, just key
-    memoryThreshold?: number
-    // above this number of bytes, value will be kept in a common bucket file (simple Buffer-s are saved as binaries)
-    bucketThreshold?: number
-    // above this number of bytes, value will be kept in a dedicated file (simple Buffer-s are saved as binaries)
-    fileThreshold?: number
-    // above this percentage (over the file size), a rewrite will be triggered to remove wasted space
-    rewriteThreshold?: number
-    // enable rewrite on open
-    rewriteOnOpen?: boolean
-    // enable rewrite after open
-    rewriteLater?: boolean
-    // passed to JSON.parse
-    reviver?: Reviver
-    // passed to JSON.stringify
-    encoder?: Encoder
-    // should encoder recur in array entries
-    digArrays?: boolean
-    // in case you want to customize the name of the files created by fileThreshold
-    keyToFileName?: (key: string) => string
-    // default delay before writing to file
-    defaultPutDelay?: number
-    // limit put-delay to avoid indefinite extension, since the delay resets with each put for the same key
-    maxPutDelay?: number
-    // override put delay for missing keys, or keys that weren't written to disk yet
-    maxPutDelayCreate?: number
-}
-
 type MemoryValue<T> = {
     v?: T, offloaded?: number, bucket?: [number, number], file?: string, // mutually exclusive fields: v=DirectValue, offloaded=OffloadedValue, bucket=BucketValue, file=ExternalFile
     format?: 'json', // only for ExternalFile and BucketValue
@@ -52,44 +23,74 @@ type MemoryValue<T> = {
 }
 
 type IteratorOptions = { startsWith?: string, limit?: number }
+type OptionFields = 'memoryThreshold' | 'bucketThreshold' | 'fileThreshold' | 'rewriteThreshold' | 'rewriteOnOpen'
+    | 'rewriteLater' | 'defaultPutDelay' | 'maxPutDelay' | 'maxPutDelayCreate' | 'reviver' | 'encoder' | 'digArrays'
+    | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName'
+
+export type KvStorageOptions<T=Encodable> = Partial<Pick<KvStorage<T>, OptionFields>>
 
 // persistent key-value storage functionality with an API inspired by levelDB
-export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOptions {
-    protected map = new Map<string, MemoryValue<T>>() // a record exists in memory if it exists on disk
-    protected realSize = 0 // keep track of the actual number of keys, since deleted keys are in memory until they are discarded from the disk as well
+export class KvStorage<T=Encodable> extends EventEmitter {
+    // above this number of bytes, value won't be kept in memory, just key
+    memoryThreshold = 1_000
+    // above this number of bytes, value will be kept in a common bucket file (simple Buffer-s are saved as binaries)
+    bucketThreshold = 2_000
+    // above this number of bytes, value will be kept in a dedicated file (simple Buffer-s are saved as binaries). This has precedence over bucket
+    fileThreshold = 100_000
+    // above this percentage (over the file size), a rewrite will be triggered to remove wasted space
+    rewriteThreshold = 0.3
+    // enable rewrite on open
+    rewriteOnOpen = true
+    // enable rewrite after open
+    rewriteLater = false
+    // default delay before writing to file
+    defaultPutDelay = 0
+    // limit put-delay to avoid indefinite extension, since the delay resets with each put for the same key
+    maxPutDelay = 10_000
+    // override put delay for missing keys, or keys that weren't written to disk yet
+    maxPutDelayCreate?: number
+    // passed to JSON.parse
+    reviver?: Reviver
+    // passed to JSON.stringify
+    encoder?: Encoder
+    // should encoder recur in array entries
+    digArrays = false
+    // you can disable this if you want 'put' to be slightly faster, at the cost of extra space. Not effective in case of fileThreshold
+    dontWriteSameValue = true
+    // must not be one of the chars used in keyToFileName
+    fileCollisionSeparator = '~'
+    // appended to the prefix of sublevel()
+    static subSeparator = ''
+    protected bucketPath = ''
+    // a record exists in memory if it exists on disk
+    protected map = new Map<string, MemoryValue<T>>()
+    // keep track of the actual number of keys, since deleted keys are in memory until they are discarded from the disk as well
+    protected mapRealSize = 0
     protected path = ''
     protected folder = ''
-    static subSeparator = ''
     protected _isOpen = false
     protected isDeleting = false
     protected fileStream: WriteStream | undefined = undefined
     protected bucketStream: WriteStream | undefined = undefined
-    protected fileSize = 0 // keep track to be able to make offloaded objects
+    // keep track to be able to make offloaded objects
+    protected fileSize = 0
+    // track size to make less I/O operations
     protected bucketSize = 0
-    memoryThreshold = 1_000
-    bucketThreshold = 10_000
-    fileThreshold = 100_000 // this has precedence over bucket
-    rewriteThreshold = 0.3
-    rewriteOnOpen = true
-    rewriteLater = false
-    dontWriteSameValue = true // not effective in case of fileThreshold
-    defaultPutDelay = 0
-    maxPutDelay = 10_000
-    maxPutDelayCreate?: number
-    wouldSave = 0 // keep track of how many bytes we would save by rewriting
-    bucketWouldSave = 0
-    bucketPath = ''
-    fileCollisionSeparator = '~' // must not be one of the chars used in keyToFileName
-    reviver?: Reviver
-    encoder?: Encoder
-    digArrays = false
-    protected lockWrite: Promise<unknown> = Promise.resolve() // used to avoid parallel writings
-    protected lockFlush: Promise<unknown> = Promise.resolve() // used to account also for delayed writings
-    protected rewritePending: undefined | Promise<unknown> // keep track, to not issue more than one
-    protected rewriteBucketPending: undefined | Promise<unknown> // keep track, to not issue more than one
-    protected files = new Map<string, number>() // keep track of collision by base-filename, and produce unique filename in the same time of a get+set
+    // keep track of how many bytes we would save by rewriting
+    protected wouldSave = 0
+    protected bucketWouldSave = 0
+    // used to avoid parallel writings
+    protected lockWrite: Promise<unknown> = Promise.resolve()
+    // used to account also for delayed writings
+    protected lockFlush: Promise<unknown> = Promise.resolve()
+    // keep track, to not issue more than one
+    protected rewritePending: undefined | Promise<unknown>
+    // keep track, to not issue more than one
+    protected rewriteBucketPending: undefined | Promise<unknown>
+    // keep track of collision by base-filename, and produce unique filename in the same time of a get+set
+    protected files = new Map<string, number>()
 
-    constructor(options: KvStorageOptions={}) {
+    constructor(options: KvStorageOptions<T>={}) {
         super()
         this.setMaxListeners(Infinity) // we may need one for every key
         Object.assign(this, options)
@@ -145,9 +146,9 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
         const will: MemoryValue<T> = { v: value, w: was?.w, waited: was?.waited } // keep reference to what's on disk
         this.map.set(key, will)
         if (value === undefined)
-            this.realSize--
+            this.mapRealSize--
         else if (was?.v === undefined)
-            this.realSize++
+            this.mapRealSize++
         const start = Date.now()
         if (!was?.w || was?.v === undefined) // maxDelayCreate applies both to values never written and missing values
             maxDelay = maxDelayCreate ?? maxDelay
@@ -233,7 +234,7 @@ export class KvStorage<T=Encodable> extends EventEmitter implements KvStorageOpt
     }
 
     size() {
-        return this.realSize
+        return this.mapRealSize
     }
 
     async *iterator(options: IteratorOptions={}) {

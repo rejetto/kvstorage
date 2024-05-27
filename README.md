@@ -42,7 +42,7 @@ To keep the main file small and keep operations fast, we have 2 mechanisms:
 
 - bucket file
 
-  the bucket file is a common file that store big values (by default is >10KB), while the key stays in the main file.
+  the bucket file is a common file that store big values (by default is >2KB), while the key stays in the main file.
   In the main file, instead of "v" you will find a "bucket" property, with coordinates inside the bucket file.
   
 - dedicated files 
