@@ -7,13 +7,17 @@
 - Zero dependencies
 - Small bundle size (10KB minified)
 - Typescript + Javascript
-- Concurrency is not supported
+- Concurrency is not supported (i.e. no multiple processes on the same file)
 - Throttled writings to file
 
 This class was designed to store small/medium data sets of JSON-able data types plus Date and Buffer,
 where you can have the luxury of keeping keys in memory.
 Small values are kept in memory as well (configurable threshold), while big ones are loaded on-demand.
 You can fine-tune this to match your memory-usage vs performance on reading.
+
+# Installation
+
+`npm i @rejetto/kvstorage`
 
 # File format
 
