@@ -257,11 +257,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         }
     }
 
-    singleSync<ST extends T>(key: string, def?: ST) {
+    singleSync<ST extends T>(key: string, def: ST) {
         const self = this
         const ret = {
-            ready: async () => self._isOpen || once(self, 'open'),
-            get: () => self.getSync(key) as ST,
+            async ready() { return self._isOpen || once(self, 'open') },
+            get() { return self.getSync(key) as ST ?? def },
             set(v: ST | ((was: ST) => ST)) {
                 if (v instanceof Function)
                     v = v(this.get())
@@ -269,8 +269,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 return v
             },
         }
-        if (def !== undefined)
-            ret.ready().then(() => ret.set(x => x ?? def))
         return ret
     }
 
