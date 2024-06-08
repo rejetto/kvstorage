@@ -66,6 +66,7 @@ There are some optimizations for class Buffer:
 
 ## By example
 
+Write a value and read it later
 ```javascript
 const { KvStorage } = require('@rejetto/kvstorage')
 let db = new KvStorage()
@@ -74,6 +75,24 @@ db.put('frank', { age: 33 })
 setTimeout(async () => {
     console.log(await db.get('frank'))
     db.del('frank')
+})
+```
+
+Same as above, but since we know data is not large, we can go sync 
+```javascript
+db.put('frank', { age: 33 })
+setTimeout(() => {
+    console.log(db.get('frank'))
+    db.del('frank')
+})
+```
+
+Same as above, but different API 
+```javascript
+const age = db.singleSync('age', 0)
+aget.set(33)
+setTimeout(() => {
+    console.log(age.get())
 })
 ```
 
