@@ -427,6 +427,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             let nextFilePos = 0
             this.files.clear()
             this.wouldSave = 0 // calculate how much we'd save by rewriting
+            this.mapRealSize = 0
             for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
@@ -444,7 +445,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                     if (!was || n > was)
                         this.files.set(base, n)
                 }
-                this.wouldSave += this.map.get(k)?.size || 0
+                const already = this.map.get(k)
+                this.wouldSave += already?.size || 0
                 const mv: MemoryValue<T> = {
                     ...file ? { file, format } : bucket ? { bucket, format } : valueSize > this.memoryThreshold ? { offset: filePos } : { v },
                     size: lineBytes,
@@ -452,6 +454,13 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 }
                 mv.w = mv // we are reading, so that's what's on disk
                 this.map.set(k, mv)
+                const wasDefined = isMemoryValueDefined(already)
+                const nowDefined = isMemoryValueDefined(record)
+                if (nowDefined !== wasDefined)
+                    if (nowDefined)
+                        this.mapRealSize++
+                    else
+                        this.mapRealSize--
             }
             this.fileSize = nextFilePos
         }
@@ -581,3 +590,8 @@ function randomId() {
 function streamReady(s: WriteStream) {
     return s.pending && once(s, 'ready')
 }
+
+function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
+    return mv?.v !== undefined || mv?.file || mv?.bucket
+}
+

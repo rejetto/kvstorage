@@ -39,7 +39,6 @@ async function test() {
                 db.put('k2', 2)
                 db.put('delete', 3)
                 db.del('delete')
-                assert(db.size() === 2, "bad size")
                 db.put('b', bigBuf)
                 assert(db.has('b'), "has")
                 assert(!db.has('never'), "has")
@@ -72,6 +71,8 @@ async function test() {
                 assert(await sub2.get('k under 2') === 21, "sub get")
                 // reopen to check persistency
                 await db.close()
+                const expectedSize = 8
+                assert(db.size() === expectedSize, "bad size")
                 db = new KvStorage({ rewriteLater: true })
                 db.on('rewrite', () => {
                     console.log('rewriting to save', db.wouldSave.toLocaleString())
@@ -83,6 +84,7 @@ async function test() {
                     console.log('rewriting bucket to save', db.bucketWouldSave.toLocaleString()))
                 assert(! readdirSync('.').filter(x => x.startsWith(FN + '-win-')).length, "rewrite leftovers") // these would accumulate in time (until process exit)
                 await db.open(FN)
+                assert(db.size() === expectedSize, "bad size after reload")
                 assert(await db.get('k1') === 'v1', "put+get")
                 assert(await db.get('k2') === 22, "numbers")
                 assert(await db.get('delete') === undefined, "delete")
