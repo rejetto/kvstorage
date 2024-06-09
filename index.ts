@@ -221,7 +221,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     has(key: string) {
-        return this.map.has(key)
+        return isMemoryValueDefined(this.map.get(key))
     }
 
     async unlink() {

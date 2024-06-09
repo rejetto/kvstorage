@@ -41,7 +41,8 @@ async function test() {
                 db.del('delete')
                 db.put('b', bigBuf)
                 assert(db.has('b'), "has")
-                assert(!db.has('never'), "has")
+                assert(!db.has('delete'), "has deleted")
+                assert(!db.has('never'), "has never")
                 await db.put('jb', { bigBuf })
                 db.put('k2', 22)
                 let n = 0
