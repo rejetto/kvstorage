@@ -247,6 +247,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             yield k
     }
 
+    firstKey(options: IteratorOptions={}) {
+        return KvStorage.filterKeys(this.map.keys(), options).next().value
+    }
+
     protected static *filterKeys(keys: Iterable<string>, options: IteratorOptions={}) {
         let { startsWith='', limit=Infinity } = options
         for (const k of keys) {

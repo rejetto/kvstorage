@@ -34,6 +34,7 @@ async function test() {
                 await db.open(FN, { clear: true })
                 assert(db.isOpen(), "isOpen")
                 assert(db.size() === 0, "empty")
+                assert(db.firstKey() === undefined, "no firstKey")
                 db.put('k1', 'v1')
                 assert(await db.get('k1') === 'v1', "no-await")
                 db.put('k2', 2)
@@ -43,6 +44,7 @@ async function test() {
                 assert(db.has('b'), "has")
                 assert(!db.has('delete'), "has deleted")
                 assert(!db.has('never'), "has never")
+                assert(db.firstKey() === 'k1', "firstKey")
                 await db.put('jb', { bigBuf })
                 db.put('k2', 22)
                 let n = 0

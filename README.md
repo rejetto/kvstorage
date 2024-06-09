@@ -82,7 +82,7 @@ Same as above, but since we know data is not large, we can go sync
 ```javascript
 db.put('frank', { age: 33 })
 setTimeout(() => {
-    console.log(db.get('frank'))
+    console.log(db.getSync('frank'))
     db.del('frank')
 })
 ```
@@ -136,6 +136,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Iterates over key-value pairs with optional filtering.
 - `*keys(options?): Generator<string>`
   - Iterates over keys with optional filtering.
+- `firstKey(): string`
+  - Return first entry of keys.
 - `sublevel(prefix: string): KvStorage-like`
   - Creates a sublevel key-value store with a specific prefix.
 - `close(): Promise<void>`
