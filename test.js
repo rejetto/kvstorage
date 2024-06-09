@@ -44,7 +44,7 @@ async function test() {
                 assert(db.has('b'), "has")
                 assert(!db.has('delete'), "has deleted")
                 assert(!db.has('never'), "has never")
-                assert(db.firstKey() === 'k1', "firstKey")
+                assert(!db.firstKey({ startsWith: 'delete' }), "deleted firstKey")
                 await db.put('jb', { bigBuf })
                 db.put('k2', 22)
                 let n = 0

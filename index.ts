@@ -178,28 +178,34 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await this.appendRecord(key, newRecord)
                 this.map.set(key, newRecord) // offload
             }
-            const isBuffer = value instanceof Buffer
-            if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
-                return saveExternalFile(value)
-            // compare with value currently on disk
-            const encodeValue = (v: T | undefined) => v === undefined ? '' : this.encode(v)
-            const {w} = will
-            const encodedOldValue = this.dontWriteSameValue && (
-                await this.readOffloadedEncoded(w) ?? await this.readBucketEncoded(w) ?? encodeValue(w?.v) )
-            if (isBuffer && value.length > this.bucketThreshold)
-                // optimized bucket-buffer comparison
-                return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
-                    || this.appendBucket(key, value)
-            const encodedNewValue = encodeValue(value)
-            if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
-            if (encodedNewValue?.length! > this.fileThreshold)
-                return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
-                    : saveExternalFile(encodedNewValue!, 'json')
-            if (encodedNewValue?.length! > this.bucketThreshold)
-                return this.appendBucket(key, encodedNewValue)
-            const { offset, size } = await this.appendRecord(key, will)
-            if (size > this.memoryThreshold) // once written, consider offloading
-                this.map.set(key, { offloaded: offset, size, w: will.w })
+            try {
+                const isBuffer = value instanceof Buffer
+                if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
+                    return saveExternalFile(value)
+                // compare with value currently on disk
+                const encodeValue = (v: T | undefined) => v === undefined ? '' : this.encode(v)
+                const {w} = will
+                const encodedOldValue = this.dontWriteSameValue && (
+                    await this.readOffloadedEncoded(w) ?? await this.readBucketEncoded(w) ?? encodeValue(w?.v) )
+                if (isBuffer && value.length > this.bucketThreshold)
+                    // optimized bucket-buffer comparison
+                    return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
+                        || this.appendBucket(key, value)
+                const encodedNewValue = encodeValue(value)
+                if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
+                if (encodedNewValue?.length! > this.fileThreshold)
+                    return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
+                        : saveExternalFile(encodedNewValue!, 'json')
+                if (encodedNewValue?.length! > this.bucketThreshold)
+                    return this.appendBucket(key, encodedNewValue)
+                const { offset, size } = await this.appendRecord(key, will)
+                if (size > this.memoryThreshold) // once written, consider offloading
+                    this.map.set(key, { offloaded: offset, size, w: will.w })
+            }
+            finally {
+                if (value === undefined)
+                    this.map.delete(key)
+            }
         }))
     }
 
@@ -243,19 +249,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     *keys(options: IteratorOptions={}) {
-        for (const k of KvStorage.filterKeys(this.map.keys(), options))
+        for (const k of KvStorage.filterKeys(this.map.keys(), options, this.map))
             yield k
     }
 
     firstKey(options: IteratorOptions={}) {
-        return KvStorage.filterKeys(this.map.keys(), options).next().value
+        return KvStorage.filterKeys(this.map.keys(), options, this.map).next().value
     }
 
-    protected static *filterKeys(keys: Iterable<string>, options: IteratorOptions={}) {
+    protected static *filterKeys(keys: Iterable<string>, options: IteratorOptions={}, map?: typeof KvStorage.prototype.map) {
         let { startsWith='', limit=Infinity } = options
         for (const k of keys) {
             if (!limit) return
             if (!k.startsWith(startsWith)) continue
+            if (map && !isMemoryValueDefined(map.get(k))) continue
             limit--
             yield k
         }
