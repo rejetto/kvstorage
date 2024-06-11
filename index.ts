@@ -359,7 +359,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected decode(data: string): Encodable {
-        return data ? JSON.parse(data, this.reviver) : undefined
+        try { return JSON.parse(data, this.reviver) }
+        catch(e) { this.emit('errorDecoding', e) }
     }
 
     protected async readExternalFile(v: MemoryValue<T>) {
@@ -444,7 +445,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 filePos = nextFilePos
                 nextFilePos = filePos + lineBytes + 1 // +newline
                 const record = this.decode(line) as any
-                if (typeof record?.k !== 'string') continue // malformed
+                if (typeof record?.k !== 'string') { // malformed
+                    this.wouldSave += lineBytes
+                    continue
+                }
                 const wrapSize = getUtf8Size(record.k) + 13 // `{"k":"","v":}`.length
                 const valueSize = lineBytes - wrapSize
                 const {k, v, file, format, bucket } = record
