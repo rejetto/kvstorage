@@ -279,6 +279,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 self.put(key, v)
                 return v
             },
+            toJSON() { return this.get() },
         }
         return ret
     }
