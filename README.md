@@ -70,7 +70,8 @@ Write a value and read it later
 ```javascript
 const { KvStorage } = require('@rejetto/kvstorage')
 let db = new KvStorage()
-db.open('filename')
+// ...
+await db.open('filename')
 db.put('frank', { age: 33 })
 setTimeout(async () => {
     console.log(await db.get('frank'))
