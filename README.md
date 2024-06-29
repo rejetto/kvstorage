@@ -151,9 +151,10 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Equivalent to unlink + open.
 - `asObject(): Promise<Object>`
   -  make all keys and values into a simple Object.
-- `singleSync<T=any>(key: string, def: T): { get, set, ready }`
+- `singleSync<T=any>(key: string, default: T): { get, set, ready }`
   - Make a simple object-api where you can get and set a value of key without passing it as parameter, and in a sync way.
-    Be sure to use this only with values that will not exceed any threshold that will cause it to be offloaded.  
+    Be sure to use this only with values that will not exceed any threshold that will cause it to be offloaded.
+  - Default value is not stored, just returned while nothing is stored.
   - Methods:
     - `get(): T` get the value, but sync.
     - `set(value: T | ((currentValue: T) => T)): T` equivalent to `put`, but also offer a callback version 

@@ -138,7 +138,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         await this.open(this.path)
     }
 
-    put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
+    async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
         if (!this._isOpen)
             throw "storage must be open first"
         const was = this.map.get(key)
