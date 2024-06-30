@@ -60,7 +60,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     // must not be one of the chars used in keyToFileName
     fileCollisionSeparator = '~'
     // set while opening
-    opening: Promise<void> | undefined = undefined
+    protected opening: Promise<void> | undefined = undefined
     // appended to the prefix of sublevel()
     static subSeparator = ''
     protected bucketPath = ''
@@ -103,6 +103,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     isOpen() { return this._isOpen }
+
+    isOpening() { return this.opening?.then() } // duplicate the promise, as in some cases its reference in global scope prevented it from being g-collected (and a single ctrl+c didn't close the process)
 
     async open(path: string, { clear=false }={}) {
         return this.lockWrite = this.opening ??= new Promise(async resolve => {

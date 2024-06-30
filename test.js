@@ -31,7 +31,10 @@ async function test() {
     try {
         await measure('all', async () => {
             await measure('basics', async () => {
-                await db.open(FN, { clear: true })
+                assert(!db.isOpening(), 'before isOpening')
+                db.open(FN, { clear: true })
+                assert(db.isOpening(), 'while isOpening')
+                await db.isOpening()
                 assert(db.isOpen(), "isOpen")
                 assert(db.size() === 0, "empty")
                 assert(db.firstKey() === undefined, "no firstKey")

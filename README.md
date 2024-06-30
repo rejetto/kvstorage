@@ -118,8 +118,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `isOpen(): boolean`
   - Current status.
-- `opening: undefined | Promise<void>`
-  - Set while we open() is ongoing.
+- `isOpening(): undefined | Promise<void>`
+  - Set while open() is ongoing.
 - `get(key: string): Promise<any>`
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`
