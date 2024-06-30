@@ -59,6 +59,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     dontWriteSameValue = true
     // must not be one of the chars used in keyToFileName
     fileCollisionSeparator = '~'
+    // set while opening
+    opening: Promise<void> | undefined = undefined
     // appended to the prefix of sublevel()
     static subSeparator = ''
     protected bucketPath = ''
@@ -103,21 +105,25 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     isOpen() { return this._isOpen }
 
     async open(path: string, { clear=false }={}) {
-        if (this._isOpen)
-            throw "cannot open twice"
-        this.path = path
-        this.folder = path + '$'
-        this.bucketPath = path + '-bucket'
-        if (clear)
-            await this.unlink().catch(() => {})
-        this.isDeleting = false
-        await this.load()
-        if (this.rewriteOnOpen)
-            await this.considerRewrite()
-        this.fileStream ??= createWriteStream(this.path, { flags: 'a' })
-        await streamReady(this.fileStream)
-        this._isOpen = true
-        this.emit('open')
+        return this.lockWrite = this.opening ??= new Promise(async resolve => {
+            if (this._isOpen)
+                throw "cannot open twice"
+            this.path = path
+            this.folder = path + '$'
+            this.bucketPath = path + '-bucket'
+            if (clear)
+                await this.unlink().catch(() => {})
+            this.isDeleting = false
+            await this.load()
+            if (this.rewriteOnOpen)
+                await this.considerRewrite()
+            this.fileStream ??= createWriteStream(this.path, { flags: 'a' })
+            await streamReady(this.fileStream)
+            this._isOpen = true
+            this.emit('open')
+            this.opening = undefined
+            resolve()
+        })
     }
 
     async close() {
@@ -210,6 +216,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     async get(key: string) {
+        await this.opening
         const rec = this.map.get(key)
         if (!rec) return
         return await this.readExternalFile(rec) // if it is, it's surely not undefined
@@ -244,6 +251,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     async *iterator(options: IteratorOptions={}) {
+        await this.opening
         for (const k of this.keys(options))
             yield [k, await this.get(k)]
     }

@@ -1,6 +1,6 @@
 {
     "name": "@rejetto/kvstorage",
-    "version": "0.11.3",
+    "version": "0.12.0",
     "description": "Persistent key-value storage functionality with an API inspired by levelDB. All keys are kept in memory. Concurrency not supported.",
     "main": ".",
     "type": "commonjs",

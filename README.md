@@ -118,19 +118,21 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted. 
 - `isOpen(): boolean`
   - Current status.
+- `opening: undefined | Promise<void>`
+  - Set while we open() is ongoing.
 - `get(key: string): Promise<any>`
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`
   - Like get, but works only with values that are not offloaded, that are those smaller the memoryThreshold and bucketThreshold and fileThreshold.
 - `put(key: string, value: any, { delay, maxDelay, maxDelayCreate }?): Promise<void>`
-  - add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
+  - Add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
   - Adding a delay may save some writings for fast-changing values. Since the delay is renewed at each put, we can put a
     limit to that, and can have a generic limit with `maxDelay` or one specific for keys that weren't written to disk yet,
     as you may care more about the existence of a (persisted) record than its updates. 
 - `del(key: string): Promise<void>`
-  - remove a value. Await-ing this is optional, unless you need to know that the file has been written.
+  - Remove a value. Await-ing this is optional, unless you need to know that the file has been written.
 - `has(key: string): boolean`
-  - check for existence 
+  - Check for existence 
 - `size(): number`
   - Returns the number of key-value pairs stored.
 - `*iterator(options?): AsyncGenerator<[key, value]>`
