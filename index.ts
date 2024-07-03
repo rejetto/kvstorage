@@ -107,7 +107,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     isOpening() { return this.opening?.then() } // duplicate the promise, as in some cases its reference in global scope prevented it from being g-collected (and a single ctrl+c didn't close the process)
 
     async open(path: string, { clear=false }={}) {
-        return this.lockWrite = this.opening ??= new Promise(async resolve => {
+        return this.opening ??= new Promise(async resolve => {
             if (this._isOpen)
                 throw "cannot open twice"
             this.path = path
