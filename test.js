@@ -137,6 +137,9 @@ async function test() {
                 db.put('z', 1)
             })
             await measure('flush', () => db.flush()) // first write previous ones
+            assert(!db.getSync('b1'), 'bucket offloaded')
+            assert(buf.equals(await db.get('b1')), 'get bucket')
+            assert(buf.equals(await db.get('b' + BN)), 'get other bucket')
             await measure('put+rewrite', async () => { // these should trigger rewrite
                 // time here is both for put-s and the triggered rewrite
                 for (let i = 1; i <= MUL; i++) db.put('o' + i, { prop: "rewrittenAgain" + i })

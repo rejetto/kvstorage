@@ -222,6 +222,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         const rec = this.map.get(key)
         if (!rec) return
         return await this.readExternalFile(rec) // if it is, it's surely not undefined
+            ?? await this.readBucketEncoded(rec)
             ?? await this.readOffloadedValue(rec)
             ?? rec.v
     }
@@ -395,7 +396,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const mv = this.map.get(k)
                 if (!mv || 'v' in mv && mv.v === undefined || !mv.w) continue // no value, or not written yet
                 const {offset} = await this.appendRecord(k, mv, true)
-                if (mv?.size)
+                if (mv?.size && mv.offloaded !== undefined)
                     mv.offloaded = offset // just offset has changed
             }
             await streamReady(this.fileStream)
