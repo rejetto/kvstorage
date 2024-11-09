@@ -1,6 +1,5 @@
 const { KvStorage } = require('.')
-const { statSync } = require('node:fs')
-const { readFileSync, readdirSync } = require('fs')
+const { statSync, writeFileSync, readFileSync, readdirSync } = require('node:fs')
 const { join } = require('path')
 
 test().catch(e => {
@@ -94,6 +93,7 @@ async function test() {
                 db.on('rewriteBucket', () =>
                     console.log('rewriting bucket to save', db.bucketWouldSave.toLocaleString()))
                 assert(! readdirSync('.').filter(x => x.startsWith(FN + '-win-')).length, "rewrite leftovers") // these would accumulate in time (until process exit)
+                writeFileSync(FN, readFileSync(FN, 'utf8').replaceAll('\n', '\r\n')) // resist to editors messing with new lines
                 await db.open(FN)
                 assert(db.size() === expectedSize, "bad size after reload")
                 assert(await db.get('k1') === 'v1', "put+get")

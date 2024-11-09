@@ -452,10 +452,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             this.files.clear()
             this.wouldSave = 0 // calculate how much we'd save by rewriting
             this.mapRealSize = 0
+            let newlineSize = 0
             for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
-                const bytesIncludingNL = lineBytes + 1
+                newlineSize ||= '\r\n' === await stream2string(createReadStream(this.path, { start: lineBytes, end: lineBytes + 1 })) ? 2 : 1
+                const bytesIncludingNL = lineBytes + newlineSize
                 nextFilePos = filePos + bytesIncludingNL
                 const record = this.decode(line) as any
                 if (typeof record?.k !== 'string') { // malformed
