@@ -15,7 +15,7 @@ type Reviver = (k: string, v: any) => any
 type Encoder = (k: string | undefined, v: any, skip: object) => any
 
 type MemoryValue<T> = {
-    v?: T, offloaded?: number, bucket?: [number, number], file?: string, // mutually exclusive fields: v=DirectValue, offloaded=OffloadedValue, bucket=BucketValue, file=ExternalFile
+    v?: T, offloaded?: number, bucket?: [number, number], file?: string, // mutually exclusive fields: v=DirectValue (in memory), offloaded=OffloadedValue (in main file), bucket=BucketValue (in bucket file), file=ExternalFile (in dedicated file)
     format?: 'json', // only for ExternalFile and BucketValue
     size?: number, // bytes in the main file
     waited?: number
@@ -474,7 +474,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const already = this.map.get(k)
                 this.wouldSave += already?.size || 0
                 const mv: MemoryValue<T> = {
-                    ...file ? { file, format } : bucket ? { bucket, format } : valueSize > this.memoryThreshold ? { offset: filePos } : { v },
+                    ...file ? { file, format } : bucket ? { bucket, format } : valueSize > this.memoryThreshold ? { offloaded: filePos } : { v },
                     size: lineBytes,
                     w: undefined,
                 }

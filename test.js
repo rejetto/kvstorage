@@ -18,7 +18,9 @@ function assert(truth, msg) {
 
 async function test() {
     const bytes = []
-    for (let i = 0; i < 20_000; i++) bytes.push(i % 256)
+    for (let i = 0; i < 1000; i++) bytes.push(i % 256) // 1000 plus b64 encoding
+    const bufToOffload = Buffer.from(bytes)
+    for (let i = 0; i < 20_000 - bufToOffload.length; i++) bytes.push(i % 256)
     const buf = Buffer.from(bytes)
     const bigBuf = Buffer.from(bytes.concat(bytes, bytes, bytes, bytes, bytes))
     const FN = 'test.db'
@@ -75,9 +77,12 @@ async function test() {
                 assert(sub1.size() === 4, "sub father size")
                 assert(sub2.size() === 2, "sub child size")
                 assert(await sub2.get('k under 2') === 21, "sub get")
+                await db.put('off', bufToOffload)
+                assert(!db.getSync('off'), 'memory offloaded')
+                assert(bufToOffload.equals(await db.get('off')), 'get offloaded')
                 // reopen to check persistency
                 await db.close()
-                const expectedSize = 8
+                const expectedSize = 9
                 assert(db.size() === expectedSize, "bad size")
                 db = new KvStorage({ rewriteLater: true })
                 db.on('rewrite', () => {
@@ -99,6 +104,9 @@ async function test() {
                 assert(db.map.get('jb')?.file, "json file")
                 assert((await db.get('b'))?.toString('base64') === bigBuf.toString('base64'), "buffer")
                 assert((await db.get('jb'))?.bigBuf?.toString('base64') === bigBuf.toString('base64'), "json-buffer")
+                assert(!db.getSync('off'), 'offloaded after open')
+                assert(bufToOffload.equals(await db.get('off')), 'get offloaded after open')
+                db.del('off')
             })
             const lastOften = await new Promise(res => {
                 const K = 'often'
@@ -120,7 +128,7 @@ async function test() {
 
                 for (let i = 1; i <= BN; i++) db.put('b'+i, buf)
                 db.put('jb64', { buf }) // this is supposed to end in bucket
-                db.put('b0', Buffer.from(bigBuf)) // this should write because direct buffers are not checked for content
+                db.put('b0', Buffer.from(bigBuf)) // this should write a separate binary file, because it's a Buffer
                 db.del('b0')
                 for (let i = 1; i <= MUL; i++) db.put('o'+i, { prop: "second" + i })
                 await db.flush()
