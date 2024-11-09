@@ -455,10 +455,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
-                nextFilePos = filePos + lineBytes + 1 // +newline
+                const bytesIncludingNL = lineBytes + 1
+                nextFilePos = filePos + bytesIncludingNL
                 const record = this.decode(line) as any
                 if (typeof record?.k !== 'string') { // malformed
-                    this.wouldSave += lineBytes
+                    this.wouldSave += bytesIncludingNL
                     continue
                 }
                 const wrapSize = getUtf8Size(record.k) + 13 // `{"k":"","v":}`.length
