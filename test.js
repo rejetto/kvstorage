@@ -106,7 +106,7 @@ async function test() {
                 assert((await db.get('jb'))?.bigBuf?.toString('base64') === bigBuf.toString('base64'), "json-buffer")
                 assert(!db.getSync('off'), 'offloaded after open')
                 assert(bufToOffload.equals(await db.get('off')), 'get offloaded after open')
-                db.del('off')
+                await db.del('off')
             })
             const lastOften = await new Promise(res => {
                 const K = 'often'
