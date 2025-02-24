@@ -434,6 +434,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await unlink(path)
             else {
                 await streamReady(f)
+                await new Promise(res => this.bucketStream?.close(res))
                 await replaceFile(path, rewriting)
             }
             this.map = newMap
@@ -603,14 +604,18 @@ export function getUtf8Size(s: string) {
     return Buffer.from(s).length
 }
 
-const IS_WINDOWS = process.platform === 'win32'
 async function replaceFile(old: string, new_: string) {
-    if (IS_WINDOWS) { // workaround, see https://github.com/nodejs/node/issues/29481
-        const add = '-win-' + randomId()
-        await rename(old, old + add) // in my tests, unlinking is not enough, and I get EPERM error anyway
-        await unlink(old + add)
-    }
+    const temp = old + '-delete-me-' + randomId()
+    await rename(old, temp) // in case the file is locked by another process, we first make the name available
     await rename(new_, old)
+    setTimeout(async () => {
+        let retry = 4
+        while (retry--) {
+            if (await unlink(temp).then(() => 1, () => 0))
+                return
+            await new Promise(res => setTimeout(res, 500))
+        }
+    })
 }
 
 function randomId() {
