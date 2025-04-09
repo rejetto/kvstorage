@@ -64,8 +64,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
     - bucketThreshold: Above this number of bytes, a record will be stored in a separate but common file, called bucket (simple Buffers are saved as binaries) (default: 10000).
     - fileThreshold: Above this number of bytes, a record will be stored in a dedicated file (simple Buffers are saved as binaries) (default: 100000).
     - rewriteThreshold: Above this percentage (over the file size), a rewrite will be triggered at load time, to remove wasted space (default: 0.3).
-    - rewriteOnOpen: Enable rewriteThreshold on open().
-    - rewriteLater: Enable rewriteThreshold after open.
+    - rewriteOnOpen: Enable rewriteThreshold on open(). (default: true)
+    - rewriteLater: Enable rewriteThreshold after open. (default: false)
     - defaultPutDelay: default value for `put(k,v,{delay})`.
     - maxPutDelay: default value for `put(k,v,{maxDelay})`.
     - maxPutDelayCreate: default value for `put(k,v,{maxDelayCreate})`.
@@ -80,7 +80,7 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
 - `get(key: string): Promise<any>`
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`
-  - Like get, but works only with values that are not offloaded, that are those smaller the memoryThreshold and bucketThreshold and fileThreshold.
+  - Like get, but works only with values that are not offloaded, specifically those smaller than the memoryThreshold, bucketThreshold, and fileThreshold.
 - `put(key: string, value: any, { delay, maxDelay, maxDelayCreate }?): Promise<void>`
   - Add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
   - Adding a delay may save some writings for fast-changing values. Since the delay is renewed at each put, we can put a
@@ -111,9 +111,9 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
 - `asObject(): Promise<Object>`
   -  make all keys and values into a simple Object.
 - `singleSync<T=any>(key: string, default: T): { get, set, ready }`
-  - Make a simple object-api where you can get and set a value of key without passing it as parameter, and in a sync way.
+  - Creates a simple object-style API for synchronous getting and setting of the value associated with `key`.
     Be sure to use this only with values that will not exceed any threshold that will cause it to be offloaded.
-  - Default value is not stored, just returned while nothing is stored.
+  - The default value is returned when no value is stored.
   - Methods:
     - `get(): T` get the value, but sync.
     - `set(value: T | ((currentValue: T) => T)): T` equivalent to `put`, but also offer a callback version
