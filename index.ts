@@ -106,6 +106,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     isOpening() { return this.opening?.then() } // duplicate the promise, as in some cases its reference in global scope prevented it from being g-collected (and a single ctrl+c didn't close the process)
 
+    async ready() { return this._isOpen || once(this, 'open') }
+
     async open(path: string, { clear=false }={}) {
         return this.opening ??= new Promise(async resolve => {
             if (this._isOpen)
@@ -309,7 +311,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             flush: () => this.flush(),
             put: (key: string, value: T | undefined) => {
                 subKeys.add(key)
-                this.put(prefix + key, value)
+                return this.put(prefix + key, value)
             },
             get: (key: string) => this.get(prefix + key),
             del: (key: string) => {

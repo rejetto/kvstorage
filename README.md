@@ -77,6 +77,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Current status.
 - `isOpening(): undefined | Promise<void>`
   - Set while open() is ongoing.
+- `ready(): Promise<void>`
+  - You can await this promise to be sure it is open.
 - `get(key: string): Promise<any>`
   - Get the value associated with the key, or undefined if not present.
 - `getSync(key: string): any`

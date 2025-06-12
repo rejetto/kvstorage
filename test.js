@@ -34,8 +34,12 @@ async function test() {
             await measure('basics', async () => {
                 assert(!db.isOpening(), 'before isOpening')
                 db.open(FN, { clear: true })
+                let isReady = false
+                db.ready().then(() => isReady = true)
                 assert(db.isOpening(), 'while isOpening')
+                assert(!isReady, 'not ready')
                 await db.isOpening()
+                await new Promise(res => res()); assert(isReady, 'ready') // need await because the then() is executed at next tick
                 assert(db.isOpen(), "isOpen")
                 assert(db.size() === 0, "empty")
                 assert(db.firstKey() === undefined, "no firstKey")
