@@ -62,7 +62,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     // set while opening
     protected opening: Promise<void> | undefined = undefined
     // appended to the prefix of sublevel()
-    static subSeparator = ''
+    static subSeparator = '\t'
     protected bucketPath = ''
     // a record exists in memory if it exists on disk
     protected map = new Map<string, MemoryValue<T>>()

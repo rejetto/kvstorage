@@ -172,7 +172,7 @@ async function test() {
             for (const v of db.map.values())
                 extra += v.file?.match(/\\/g)?.length || 0 // this path separator uses 1 extra byte once encoded
             const finalSize = statSync(FN).size
-            assert(finalSize === 541896 + extra, `final size ${finalSize}`)
+            assert(finalSize === 541908 + extra, `final size ${finalSize}`)
             console.log('final size: ', finalSize.toLocaleString())
         })
     }
