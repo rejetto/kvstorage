@@ -3,6 +3,8 @@ import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { dirname, join } from 'path'
 import { EventEmitter, once } from 'events'
+import { pipeline } from 'stream/promises'
+import { Transform } from 'stream'
 import readline from 'readline'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
@@ -152,7 +154,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         if (!this._isOpen)
             throw "storage must be open first"
         const was = this.map.get(key)
-        if (!was?.file && !was?.offloaded && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
+        if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
         const will: MemoryValue<T> = { v: value, w: was?.w, waited: was?.waited } // keep reference to what's on disk
         this.map.set(key, will)
         if (value === undefined)
@@ -176,7 +178,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             const oldFile = inMemoryNow?.w?.file // don't use `was` as an async writing could have happened in the meantime
             if (oldFile)
                 await unlink(join(folder, oldFile))
-            const saveExternalFile = async (content: Buffer | string, format?: 'json') => {
+            const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
                 let filename = this.keyToFileName(key)
                 const n = this.files.get(filename)
                 this.files.set(filename, (n || 0) + 1)
@@ -189,7 +191,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 this.map.set(key, newRecord) // offload
             }
             try {
-                const isBuffer = value instanceof Buffer
+                const isBuffer = value instanceof Uint8Array
                 if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                     return saveExternalFile(value)
                 // compare with value currently on disk
@@ -199,7 +201,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                     await this.readOffloadedEncoded(w) ?? await this.readBucketEncoded(w) ?? encodeValue(w?.v) )
                 if (isBuffer && value.length > this.bucketThreshold)
                     // optimized bucket-buffer comparison
-                    return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && value.equals(encodedOldValue)
+                    return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && encodedOldValue.equals(value)
                         || this.appendBucket(key, value)
                 const encodedNewValue = encodeValue(value)
                 if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
@@ -283,7 +285,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     singleSync<ST extends T>(key: string, def: ST) {
         const self = this
-        const ret = {
+        return {
             async ready() { return self._isOpen || once(self, 'open') },
             get() { return self.getSync(key) as ST ?? def },
             set(v: ST | ((was: ST) => ST)) {
@@ -294,7 +296,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             },
             toJSON() { return this.get() },
         }
-        return ret
     }
 
     async asObject() {
@@ -362,8 +363,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected readOffloadedEncoded(v: MemoryValue<T> | undefined) {
-        return v?.offloaded === undefined ? undefined
-            : stream2string(createReadStream(this.path, { start: v.offloaded, end: v.offloaded + v.size! - 1 }))
+        if (v?.offloaded === undefined) return
+        if (!v.size || v.size < 1) {
+            this.emit('errorDecoding', Error(`invalid offloaded metadata: offloaded=${v.offloaded} size=${v.size}`))
+            return Promise.resolve('')
+        }
+        return stream2string(createReadStream(this.path, { start: v.offloaded, end: v.offloaded + v.size - 1 }))
     }
 
     // limited to 'ready' and 'offloaded'
@@ -447,9 +452,18 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         })
     }
 
-    protected async load() {
+    protected async load(): Promise<void> {
         try {
-            const rl = readline.createInterface({ input: createReadStream(this.path) })
+            // check if tail contains CR. first line is checked in the for-loop
+            const {size} = await stat(this.path)
+            if (size > 1) {
+                const lastTerminator = await stream2buffer(createReadStream(this.path, { start: size - 2, end: size - 1 }))
+                if (lastTerminator.includes(13))
+                    await this.normalizeMainFile()
+            }
+
+            const input = createReadStream(this.path)
+            const rl = readline.createInterface({ input })
             let filePos = 0 // track where we are, to make Offloaded
             let nextFilePos = 0
             this.files.clear()
@@ -459,9 +473,18 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
                 filePos = nextFilePos
-                newlineSize ||= '\r\n' === await stream2string(createReadStream(this.path, { start: lineBytes, end: lineBytes + 1 })) ? 2 : 1
+                if (!newlineSize) {
+                    const start = filePos + lineBytes  // filePos is zero, but it's good practice to include it
+                    newlineSize = '\r\n' === await stream2string(createReadStream(this.path, { start, end: start + 1 })) ? 2 : 1
+                    if (newlineSize === 2) {
+                        await new Promise(res => input.close(res)) // On Windows rename can fail while the read handle is still open
+                        await this.normalizeMainFile()
+                        return this.load()
+                    }
+                }
                 const bytesIncludingNL = lineBytes + newlineSize
-                nextFilePos = filePos + bytesIncludingNL
+                // Crash/truncation may leave the last line without a newline; clamping keeps offsets aligned with on-disk bytes.
+                nextFilePos = Math.min(size, filePos + bytesIncludingNL)
                 const record = this.decode(line) as any
                 if (typeof record?.k !== 'string') { // malformed
                     this.wouldSave += bytesIncludingNL
@@ -469,9 +492,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 }
                 const wrapSize = getUtf8Size(record.k) + 13 // `{"k":"","v":}`.length
                 const valueSize = lineBytes - wrapSize
-                const {k, v, file, format, bucket } = record
+                const { k, v, file, format, bucket } = record
                 if (file) { // rebuild this.files
-                    // we don't rely in using current keyToFileName, as we allow having used a different one in the past
+                    // we don't rely on using the current keyToFileName, as we allow having used a different one in the past
                     let [base, n] = file.split(this.fileCollisionSeparator)
                     const was = this.files.get(base)
                     n = Number(n) || 0
@@ -505,13 +528,16 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected async encodeRecord(k: string, mv: MemoryValue<T>) {
-        return await this.readOffloadedEncoded(mv) // offloaded will keep same key. This is acceptable with current usage.
+        return await this.readOffloadedEncoded(mv) // offloaded will keep the same key. This is acceptable with current usage.
             ?? this.encode({ k, ...mv, w: undefined, waited: undefined, size: undefined }, 'v' in mv) // if it's not offloaded, it's DirectValue or ExternalFile
     }
 
     // NB: this must be called only from within a lockWrite
     protected async appendRecord(key: string, mv: MemoryValue<T>, rewriting=false) {
         const line = await this.encodeRecord(key, mv)
+        // Writing empty/non-string lines would silently inject malformed rows and drift offsets.
+        if (typeof line !== 'string' || !line)
+            throw Error(`invalid encoded record for key ${JSON.stringify(key)}`)
         const res = await this.appendLine(line)
         this.emit('wrote', { key, rewriting, value: mv.v })
         if (!rewriting && mv !== mv.w) {
@@ -577,13 +603,13 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     protected async appendLine(line: string) {
         const offset = this.fileSize
         const size = getUtf8Size(line)
-        this.fileSize += size + 1 // newline
+        this.fileSize += size + 1 // 1=newline
         this.emit('write', line)
         await new Promise(res => this.fileStream!.write(line + '\n', res))
         return { offset, size }
     }
 
-    protected async appendBucket(key: string, what: string | Buffer) {
+    protected async appendBucket(key: string, what: string | Uint8Array) {
         this.bucketSize ||= await stat(this.bucketPath).then(x => x.size, () => 0)
         this.bucketStream ||= createWriteStream(this.bucketPath, { flags: 'a' })
         this.emit('writeBucket', what)
@@ -598,6 +624,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         this.bucketSize += size
         await this.appendRecord(key, rec)
         this.map.set(key, rec)
+    }
+
+    protected async normalizeMainFile() {
+        const temp = this.path + '-normalizing-' + randomId()
+        await pipeline(
+            createReadStream(this.path),
+            new Transform({ // we only need canonical newlines in storage files: stripping CR bytes avoids text decoding overhead
+                transform(chunk, _, done) {
+                    done(undefined, Buffer.from(chunk.toString('latin1').replace(/\r/g, ''), 'latin1')) // latin1 avoids multibyte decode artifacts and lets native String.replace strip CR faster than a JS byte loop
+                }
+            }),
+            createWriteStream(temp, { flags: 'w' })
+        )
+        await replaceFile(this.path, temp)
     }
 
 }
@@ -631,4 +671,3 @@ function streamReady(s: WriteStream) {
 function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
     return mv?.v !== undefined || mv?.file || mv?.bucket
 }
-

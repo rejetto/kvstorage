@@ -24,6 +24,8 @@ async function test() {
     const bigBuf = Buffer.from(bytes.concat(bytes, bytes, bytes, bytes, bytes))
     const FN = 'test.db'
     let db = new KvStorage()
+    let decodeErrors = 0
+    db.on('errorDecoding', () => decodeErrors++)
     const original = db.keyToFileName
     db.keyToFileName = k => {
         const x = original(k)
@@ -88,6 +90,7 @@ async function test() {
                 const expectedSize = 9
                 assert(db.size() === expectedSize, "bad size")
                 db = new KvStorage({ rewriteLater: true })
+                db.on('errorDecoding', () => decodeErrors++)
                 db.on('rewrite', () => {
                     console.log('rewriting to save', db.wouldSave.toLocaleString())
                     db.put('while-rewriting', 1)
@@ -99,6 +102,8 @@ async function test() {
                 assert(! readdirSync('.').filter(x => x.startsWith(FN + '-win-')).length, "rewrite leftovers") // these would accumulate in time (until process exit)
                 writeFileSync(FN, readFileSync(FN, 'utf8').replaceAll('\n', '\r\n')) // resist to editors messing with new lines
                 await db.open(FN)
+                // Open canonicalizes storage files to LF to keep offsets stable for offloaded records.
+                assert(!readFileSync(FN, 'utf8').includes('\r'), 'normalized to LF')
                 assert(db.size() === expectedSize, "bad size after reload")
                 assert(await db.get('k1') === 'v1', "put+get")
                 assert(await db.get('k2') === 22, "numbers")
@@ -111,6 +116,44 @@ async function test() {
                 assert(!db.getSync('off'), 'offloaded after open')
                 assert(bufToOffload.equals(await db.get('off')), 'get offloaded after open')
                 await db.del('off')
+            })
+            await measure('mixed-newline-regression', async () => {
+                const FN = 'mixed-newline.db'
+                const targetValue = 'X'.repeat(30)
+                const targetLine = JSON.stringify({ k: 'target', v: targetValue })
+                const chunks = [JSON.stringify({ k: 'first', v: 1 }) + '\r\n']
+                for (let i = 0; i < targetLine.length; i++)
+                    chunks.push(JSON.stringify({ k: 'f' + i, v: i }) + '\n')
+                chunks.push(targetLine)
+                writeFileSync(FN, chunks.join(''))
+                const mixed = new KvStorage({ memoryThreshold: 1, rewriteOnOpen: false })
+                mixed.on('errorDecoding', () => decodeErrors++)
+                await mixed.open(FN)
+                await mixed.rewrite()
+                // This sequence previously produced size=0 offloaded records and then ERR_OUT_OF_RANGE on put().
+                await mixed.put('target', 'Y')
+                assert(await mixed.get('target') === 'Y', 'mixed newline rewrite+put')
+                await mixed.unlink()
+            })
+            await measure('truncated-tail-regression', async () => {
+                const FN = 'truncated-tail.db'
+                const truncated = new KvStorage({ memoryThreshold: 1, rewriteOnOpen: false })
+                let localDecodeErrors = 0
+                truncated.on('errorDecoding', () => localDecodeErrors++)
+                await truncated.open(FN, { clear: true })
+                const initialValue = 'S'.repeat(30)
+                const updatedValue = 'T'.repeat(30)
+                await truncated.put('stable', initialValue)
+                await truncated.put('tail', 'U'.repeat(30))
+                await truncated.close()
+                const fileBytes = readFileSync(FN)
+                // Dropping the final 5 bytes keeps the file mostly valid while guaranteeing an incomplete trailing record.
+                writeFileSync(FN, fileBytes.subarray(0, fileBytes.length - 5))
+                await truncated.open(FN)
+                await truncated.put('stable', updatedValue)
+                assert(await truncated.get('stable') === updatedValue, 'truncated tail keeps offloaded writes working')
+                assert(localDecodeErrors > 0, `truncated tail detected ${localDecodeErrors}`)
+                await truncated.unlink()
             })
             const lastOften = await new Promise(res => {
                 const K = 'often'
@@ -173,6 +216,7 @@ async function test() {
                 extra += v.file?.match(/\\/g)?.length || 0 // this path separator uses 1 extra byte once encoded
             const finalSize = statSync(FN).size
             assert(finalSize === 541908 + extra, `final size ${finalSize}`)
+            assert(decodeErrors === 0, `errorDecoding ${decodeErrors}`)
             console.log('final size: ', finalSize.toLocaleString())
         })
     }
