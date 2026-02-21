@@ -327,34 +327,29 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     sublevel(prefix: string) {
+        const storage = this
         prefix = prefix + KvStorage.subSeparator
-        // Sublevel APIs operate on local keys, so we must strip the persisted prefix also for pre-existing rows.
-        const subKeys = new Set(Array.from(this.keys({ startsWith: prefix }), key => key.slice(prefix.length)))
         const ret = {
-            flush: () => this.flush(),
-            put: (key: string, value: T | undefined) => {
-                subKeys.add(key)
-                return this.put(prefix + key, value)
-            },
-            get: (key: string) => this.get(prefix + key),
-            del: (key: string) => {
-                subKeys.delete(key)
-                return this.del(prefix + key)
-            },
+            flush: () => storage.flush(),
+            put: (key: string, value: T | undefined) => storage.put(prefix + key, value),
+            get: (key: string) => storage.get(prefix + key),
+            del: (key: string) => storage.del(prefix + key),
             async unlink() {
-                for (const k of subKeys) await this.del(k)
+                for (const k of Array.from(this.keys({}))) await this.del(k)
             },
-            size: () => subKeys.size,
-            has: (key: string) => subKeys.has(key),
-            *keys(options: IteratorOptions) {
-                for (const k of KvStorage.filterKeys(subKeys, options))
-                    yield k
+            size: () => Array.from(ret.keys({})).length,
+            has: (key: string) => storage.has(prefix + key),
+            *keys(options: IteratorOptions={}) {
+                // A live view over parent keys avoids stale sublevel state when parent writes bypass this sublevel.
+                const startsWith = prefix + (options.startsWith || '')
+                for (const k of KvStorage.filterKeys(storage.map.keys(), { ...options, startsWith }, storage.map))
+                    yield k.slice(prefix.length)
             },
             async *iterator(options: IteratorOptions={}) {
                 for (const k of this.keys(options))
                     yield [k, await this.get(k)]
             },
-            sublevel: (prefix: string) => this.sublevel.call(ret, prefix),
+            sublevel: (childPrefix: string) => storage.sublevel(prefix + childPrefix),
         }
         return ret
     }

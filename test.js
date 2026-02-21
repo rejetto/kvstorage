@@ -209,6 +209,22 @@ async function test() {
                 assert(await subBase.get('users\tbob') === undefined, 'sublevel unlink removes bob')
                 await subBase.unlink()
             })
+            await measure('sublevel-stale-sync-regression', async () => {
+                const FN = 'sublevel-stale-sync.db'
+                const parent = new KvStorage({ rewriteOnOpen: false })
+                await parent.open(FN, { clear: true })
+                const users = parent.sublevel('users')
+                await users.put('alice', 1)
+                await parent.flush()
+                await parent.del('users\talice')
+                await parent.flush()
+                assert(!users.has('alice'), 'sublevel has follows parent delete')
+                assert(Array.from(users.keys({})).length === 0, 'sublevel keys follow parent delete')
+                await users.put('bob', undefined)
+                await parent.flush()
+                assert(!users.has('bob'), 'sublevel put undefined does not keep ghost key')
+                await parent.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0
