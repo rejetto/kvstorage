@@ -5,7 +5,7 @@
 - API inspired by levelDB
 - All keys are kept in memory
 - Zero dependencies
-- Small bundle size (10KB minified)
+- Small bundle size (~14KB minified)
 - Typescript + Javascript
 - Concurrency is not supported (i.e. no multiple processes on the same file)
 - Throttled writings to file

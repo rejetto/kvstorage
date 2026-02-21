@@ -155,6 +155,29 @@ async function test() {
                 assert(localDecodeErrors > 0, `truncated tail detected ${localDecodeErrors}`)
                 await truncated.unlink()
             })
+            await measure('lock-regression', async () => {
+                const FN = 'lock.db'
+                const first = new KvStorage({ rewriteOnOpen: false })
+                await first.open(FN, { clear: true })
+                const second = new KvStorage({ rewriteOnOpen: false })
+                const lockError = await second.open(FN).then(() => '', String)
+                assert(lockError.includes('storage locked'), 'lock blocks second instance')
+                const unlocked = new KvStorage({ rewriteOnOpen: false, crossProcessLock: false })
+                await unlocked.open(FN)
+                assert(unlocked.isOpen(), 'opt-out lock allows parallel open')
+                await unlocked.close()
+                await first.close()
+                await second.open(FN)
+                await second.put('k', 'v')
+                assert(await second.get('k') === 'v', 'second instance opens after release')
+                await second.close()
+                writeFileSync(FN + '.lock', '9999999')
+                const stale = new KvStorage({ rewriteOnOpen: false })
+                // This simulates a crashed writer that left a stale lock file behind.
+                await stale.open(FN)
+                assert(stale.isOpen(), 'stale lock recovered')
+                await stale.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0
