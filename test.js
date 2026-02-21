@@ -178,6 +178,21 @@ async function test() {
                 assert(stale.isOpen(), 'stale lock recovered')
                 await stale.unlink()
             })
+            await measure('rewrite-bucket-repeat-regression', async () => {
+                const FN = 'rewrite-bucket-repeat.db'
+                const bucketed = new KvStorage({ rewriteOnOpen: false, bucketThreshold: 1, fileThreshold: 1_000_000 })
+                let rewriteBucketCount = 0
+                bucketed.on('rewriteBucket', () => rewriteBucketCount++)
+                await bucketed.open(FN, { clear: true })
+                await bucketed.put('k', 'first bucket payload')
+                await bucketed.flush()
+                await bucketed.rewriteBucket()
+                await bucketed.put('k', 'second bucket payload')
+                await bucketed.flush()
+                await bucketed.rewriteBucket()
+                assert(rewriteBucketCount === 2, `rewrite bucket count ${rewriteBucketCount}`)
+                await bucketed.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0

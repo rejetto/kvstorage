@@ -469,7 +469,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             this.bucketStream = f
             this.bucketSize = ofs
             this.bucketWouldSave = 0
-            this.rewritePending = undefined
+            this.rewriteBucketPending = undefined
         })
     }
 
