@@ -328,7 +328,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     sublevel(prefix: string) {
         prefix = prefix + KvStorage.subSeparator
-        const subKeys = new Set(this.keys({ startsWith: prefix }))
+        // Sublevel APIs operate on local keys, so we must strip the persisted prefix also for pre-existing rows.
+        const subKeys = new Set(Array.from(this.keys({ startsWith: prefix }), key => key.slice(prefix.length)))
         const ret = {
             flush: () => this.flush(),
             put: (key: string, value: T | undefined) => {

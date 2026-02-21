@@ -193,6 +193,22 @@ async function test() {
                 assert(rewriteBucketCount === 2, `rewrite bucket count ${rewriteBucketCount}`)
                 await bucketed.unlink()
             })
+            await measure('sublevel-preexisting-keys-regression', async () => {
+                const FN = 'sublevel-preexisting-keys.db'
+                const subBase = new KvStorage({ rewriteOnOpen: false })
+                await subBase.open(FN, { clear: true })
+                await subBase.put('users\talice', 1)
+                await subBase.put('users\tbob', 2)
+                await subBase.flush()
+                const users = subBase.sublevel('users')
+                assert(users.has('alice'), 'sublevel has preexisting key')
+                const listed = Array.from(users.keys({}))
+                assert(listed.includes('alice'), `sublevel keys include stripped key ${JSON.stringify(listed)}`)
+                await users.unlink()
+                assert(await subBase.get('users\talice') === undefined, 'sublevel unlink removes alice')
+                assert(await subBase.get('users\tbob') === undefined, 'sublevel unlink removes bob')
+                await subBase.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0
