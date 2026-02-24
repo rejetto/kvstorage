@@ -74,11 +74,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     protected mapRealSize = 0
     protected path = ''
     protected folder = ''
-    protected lockPath = ''
     protected _isOpen = false
     protected isDeleting = false
     protected fileStream: WriteStream | undefined = undefined
     protected bucketStream: WriteStream | undefined = undefined
+    protected lockPath = ''
     protected lockHandle: Awaited<ReturnType<typeof openFile>> | undefined = undefined
     // keep track to be able to make offloaded objects
     protected fileSize = 0
@@ -115,22 +115,19 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     async ready() { return this._isOpen || once(this, 'open') }
 
     async open(path: string, { clear=false }={}) {
-        if (this.opening)
-            return this.opening
-        const opening = new Promise<void>((resolve, reject) => void (async () => {
-            if (this._isOpen)
-                throw "cannot open twice"
-            this.path = path
-            this.folder = path + '$'
-            this.bucketPath = path + '-bucket'
-            this.lockPath = path + '.lock'
-            if (this.crossProcessLock)
-                await this.acquireLock()
-            if (clear)
-                await this.removeStorageFiles().catch(() => {})
-            this.isDeleting = false
-            let opened = false
+        return this.opening ??= new Promise<void>(async (resolve, reject) => {
             try {
+                if (this._isOpen)
+                    throw "cannot open twice"
+                this.path = path
+                this.folder = path + '$'
+                this.bucketPath = path + '-bucket'
+                this.lockPath = path + '.lock'
+                if (this.crossProcessLock)
+                    await this.acquireLock()
+                if (clear)
+                    await this.removeStorageFiles().catch(() => {})
+                this.isDeleting = false
                 await this.load()
                 if (this.rewriteOnOpen)
                     await this.considerRewrite()
@@ -138,19 +135,15 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await streamReady(this.fileStream)
                 this._isOpen = true
                 this.emit('open')
-                opened = true
                 resolve()
             }
-            finally {
-                // If opening fails after lock acquisition, we must release the lock to avoid deadlocking future opens.
-                if (!opened)
-                    await this.releaseLock()
+            catch(e) {
+                await this.releaseLock()
+                reject(e)
             }
-        })().catch(reject))
-        this.opening = opening
-        return opening.finally(() => {
-            if (this.opening === opening)
+            finally {
                 this.opening = undefined
+            }
         })
     }
 
@@ -658,24 +651,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected async acquireLock() {
-        for (let retry = 0; retry < 2; retry++) {
+        let retry = 3
+        while (retry--)
             try {
                 this.lockHandle = await openFile(this.lockPath, 'wx')
-                await this.lockHandle.writeFile(String(process.pid))
-                return
+                return this.lockHandle.writeFile(String(process.pid))
             }
             catch (e: any) {
                 if (e?.code !== 'EEXIST')
                     throw e
-                const staleOwner = await this.readLockOwnerPid()
-                if (staleOwner && !isPidAlive(staleOwner)) {
-                    // A stale lock from a dead process must be removed or the DB becomes permanently inaccessible.
-                    await unlink(this.lockPath).catch(() => {})
-                    continue
-                }
-                throw Error(`storage locked: ${this.path}`)
+                const oldPid = Number(await readFile(this.lockPath, 'utf8').catch(() => 0))
+                if (oldPid && isPidAlive(oldPid))
+                    throw Error(`storage locked: ${this.path}`)
+                await unlink(this.lockPath).catch(() => {}) // a stale lock from a dead process must be removed or the DB becomes permanently inaccessible
             }
-        }
     }
 
     protected async releaseLock() {
@@ -683,17 +672,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         await this.lockHandle.close().catch(() => {})
         this.lockHandle = undefined
         await unlink(this.lockPath).catch(() => {})
-    }
-
-    protected async readLockOwnerPid() {
-        try {
-            const raw = (await readFile(this.lockPath, 'utf8')).trim()
-            const pid = Number(raw)
-            return Number.isInteger(pid) && pid > 0 ? pid : undefined
-        }
-        catch {
-            return undefined
-        }
     }
 
     protected async removeStorageFiles() {
