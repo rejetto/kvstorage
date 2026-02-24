@@ -1,5 +1,5 @@
 const { KvStorage } = require('.')
-const { statSync, writeFileSync, readFileSync, readdirSync } = require('node:fs')
+const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync } = require('node:fs')
 const { join } = require('path')
 
 test().catch(e => {
@@ -170,6 +170,26 @@ async function test() {
                 await reloaded.open(FN)
                 assert(await reloaded.get('k') === 'v', 'value persists after reopening')
                 await reloaded.unlink()
+            })
+            await measure('cleanup-on-open-isolation-regression', async () => {
+                const base = 'cleanup.db'
+                const ownMainTemp = base + '-delete-me-own'
+                const ownBucketTemp = base + '-bucket-delete-me-own'
+                const siblingTemp = base + '2-delete-me-sibling'
+                for (const f of [ownMainTemp, ownBucketTemp, siblingTemp])
+                    if (readdirSync('.').includes(f))
+                        unlinkSync(f)
+                writeFileSync(ownMainTemp, '')
+                writeFileSync(ownBucketTemp, '')
+                writeFileSync(siblingTemp, '')
+                const cleanup = new KvStorage({ rewriteOnOpen: false })
+                await cleanup.open(base, { clear: true })
+                const files = readdirSync('.')
+                assert(!files.includes(ownMainTemp), 'cleanup removes own main temp')
+                assert(!files.includes(ownBucketTemp), 'cleanup removes own bucket temp')
+                assert(files.includes(siblingTemp), 'cleanup does not remove sibling temp')
+                await cleanup.unlink()
+                unlinkSync(siblingTemp)
             })
             await measure('rewrite-bucket-repeat-regression', async () => {
                 const FN = 'rewrite-bucket-repeat.db'

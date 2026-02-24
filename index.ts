@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, rm, stat, opendir } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { EventEmitter, once } from 'events'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
@@ -27,9 +27,11 @@ type MemoryValue<T> = {
 type IteratorOptions = { startsWith?: string, limit?: number }
 type OptionFields = 'memoryThreshold' | 'bucketThreshold' | 'fileThreshold' | 'rewriteThreshold' | 'rewriteOnOpen'
     | 'rewriteLater' | 'defaultPutDelay' | 'maxPutDelay' | 'maxPutDelayCreate' | 'reviver' | 'encoder' | 'digArrays'
-    | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName'
+    | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName' | 'cleanupOnOpen'
 
 export type KvStorageOptions<T=Encodable> = Partial<Pick<KvStorage<T>, OptionFields>>
+
+const DELETE_ME = '-delete-me-'
 
 // persistent key-value storage functionality with an API inspired by levelDB
 export class KvStorage<T=Encodable> extends EventEmitter {
@@ -61,6 +63,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     dontWriteSameValue = true
     // must not be one of the chars used in keyToFileName
     fileCollisionSeparator = '~'
+    // allow opting out of stale temp-file cleanup during open (eg. debugging or custom external cleanup)
+    cleanupOnOpen = true
     // set while opening
     protected opening: Promise<void> | undefined = undefined
     // appended to the prefix of sublevel()
@@ -114,6 +118,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     async ready() { return this._isOpen || once(this, 'open') }
 
     async open(path: string, { clear=false }={}) {
+        if (!path)
+            throw Error("invalid path")
         return this.opening ??= new Promise<void>(async (resolve, reject) => {
             try {
                 if (this._isOpen)
@@ -123,11 +129,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 this.bucketPath = path + '-bucket'
                 if (clear)
                     await this.removeStorageFiles().catch(() => {})
+                if (this.cleanupOnOpen) {
+                    const folder = dirname(path)
+                    const base = basename(path)
+                    const mainTempPrefix = base + DELETE_ME
+                    const bucketTempPrefix = base + '-bucket' + DELETE_ME
+                    for await (const {name} of await opendir(folder).catch(() => []))
+                        if (name.startsWith(mainTempPrefix) || name.startsWith(bucketTempPrefix))
+                            await unlink(join(folder, name)).catch(() => {}) // best effort
+                }
                 this.isDeleting = false
                 await this.load()
                 if (this.rewriteOnOpen)
                     await this.considerRewrite()
-                this.fileStream ??= createWriteStream(this.path, { flags: 'a' })
+                this.fileStream ??= createWriteStream(path, { flags: 'a' })
                 await streamReady(this.fileStream)
                 this._isOpen = true
                 this.emit('open')
@@ -397,7 +412,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewrite', this.rewritePending)
             const {path} = this
-            const rewriting = path + '-rewriting-' + randomId() // use same volume, to be sure we can rename to destination
+            const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
             if (this.fileStream?.writable)
                 await new Promise(res => this.fileStream?.close(res))
             this.fileStream = createWriteStream(rewriting, { flags: 'w' })
@@ -421,7 +436,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         return this.rewriteBucketPending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
             this.emit('rewriteBucket')
             const {bucketPath: path} = this
-            const rewriting = path + '-rewriting-' + randomId() // use same volume, to be sure we can rename to destination
+            const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
             let f: typeof this.bucketStream
             let lastWrite: any
             let ofs = 0
@@ -631,7 +646,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected async normalizeMainFile() {
-        const temp = this.path + '-normalizing-' + randomId()
+        const temp = this.path + DELETE_ME + randomId()
         await pipeline(
             createReadStream(this.path),
             new Transform({ // we only need canonical newlines in storage files: stripping CR bytes avoids text decoding overhead
@@ -657,7 +672,7 @@ export function getUtf8Size(s: string) {
 }
 
 async function replaceFile(old: string, new_: string) {
-    const temp = old + '-delete-me-' + randomId()
+    const temp = old + DELETE_ME + randomId()
     await rename(old, temp) // in case the file is locked by another process, we first make the name available
     await rename(new_, old)
     setTimeout(async () => {
