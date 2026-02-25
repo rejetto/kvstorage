@@ -75,8 +75,8 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Opens the key-value store at the specified path. If clear is true, existing data will be deleted.
 - `isOpen(): boolean`
   - Current status.
-- `isOpening(): undefined | Promise<void>`
-  - Set while open() is ongoing.
+- `isOpening(): undefined | Promise<boolean>`
+  - undefined if no open is in progress; otherwise resolves to true on success, false on failure.
 - `ready(): Promise<void>`
   - You can await this promise to be sure it is open.
 - `get(key: string): Promise<any>`

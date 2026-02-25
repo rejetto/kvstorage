@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { unlink, rename, mkdir, writeFile, rm, stat, open as openFile, readFile } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { dirname, join } from 'path'
 import { EventEmitter, once } from 'events'
@@ -27,7 +27,7 @@ type MemoryValue<T> = {
 type IteratorOptions = { startsWith?: string, limit?: number }
 type OptionFields = 'memoryThreshold' | 'bucketThreshold' | 'fileThreshold' | 'rewriteThreshold' | 'rewriteOnOpen'
     | 'rewriteLater' | 'defaultPutDelay' | 'maxPutDelay' | 'maxPutDelayCreate' | 'reviver' | 'encoder' | 'digArrays'
-    | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName' | 'crossProcessLock'
+    | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName'
 
 export type KvStorageOptions<T=Encodable> = Partial<Pick<KvStorage<T>, OptionFields>>
 
@@ -61,8 +61,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     dontWriteSameValue = true
     // must not be one of the chars used in keyToFileName
     fileCollisionSeparator = '~'
-    // prevent two processes from writing the same db path concurrently; set false to opt out explicitly
-    crossProcessLock = true
     // set while opening
     protected opening: Promise<void> | undefined = undefined
     // appended to the prefix of sublevel()
@@ -78,11 +76,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     protected isDeleting = false
     protected fileStream: WriteStream | undefined = undefined
     protected bucketStream: WriteStream | undefined = undefined
-    protected lockPath = ''
-    protected lockHandle: Awaited<ReturnType<typeof openFile>> | undefined = undefined
     // keep track to be able to make offloaded objects
     protected fileSize = 0
-    // track size to make less I/O operations
+    // track size to make fewer I/O operations
     protected bucketSize = 0
     // keep track of how many bytes we would save by rewriting
     protected wouldSave = 0
@@ -110,7 +106,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     isOpen() { return this._isOpen }
 
-    isOpening() { return this.opening?.then() } // duplicate the promise, as in some cases its reference in global scope prevented it from being g-collected (and a single ctrl+c didn't close the process)
+    isOpening() {
+        // the main purpose of .then here is to avoid uncaught promises for those calling isOpening, but also to duplicate the promise, as in some cases its reference in global scope prevented it from being g-collected (and a single ctrl+c didn't close the process)
+        return this.opening?.then(() => true, () => false)
+    }
 
     async ready() { return this._isOpen || once(this, 'open') }
 
@@ -118,13 +117,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         return this.opening ??= new Promise<void>(async (resolve, reject) => {
             try {
                 if (this._isOpen)
-                    throw "cannot open twice"
+                    throw Error("cannot open twice")
                 this.path = path
                 this.folder = path + '$'
                 this.bucketPath = path + '-bucket'
-                this.lockPath = path + '.lock'
-                if (this.crossProcessLock)
-                    await this.acquireLock()
                 if (clear)
                     await this.removeStorageFiles().catch(() => {})
                 this.isDeleting = false
@@ -138,7 +134,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 resolve()
             }
             catch(e) {
-                await this.releaseLock()
                 reject(e)
             }
             finally {
@@ -152,7 +147,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         this.fileStream = undefined
         this._isOpen = false
         this.map.clear()
-        await this.releaseLock()
     }
 
     flush(): typeof this.lockFlush {
@@ -168,7 +162,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
         if (!this._isOpen)
-            throw "storage must be open first"
+            throw Error("storage must be open first")
         const was = this.map.get(key)
         if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
         const will: MemoryValue<T> = { v: value, w: was?.w, waited: was?.waited } // keep reference to what's on disk
@@ -650,30 +644,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         await replaceFile(this.path, temp)
     }
 
-    protected async acquireLock() {
-        let retry = 3
-        while (retry--)
-            try {
-                this.lockHandle = await openFile(this.lockPath, 'wx')
-                return this.lockHandle.writeFile(String(process.pid))
-            }
-            catch (e: any) {
-                if (e?.code !== 'EEXIST')
-                    throw e
-                const oldPid = Number(await readFile(this.lockPath, 'utf8').catch(() => 0))
-                if (oldPid && isPidAlive(oldPid))
-                    throw Error(`storage locked: ${this.path}`)
-                await unlink(this.lockPath).catch(() => {}) // a stale lock from a dead process must be removed or the DB becomes permanently inaccessible
-            }
-    }
-
-    protected async releaseLock() {
-        if (!this.lockHandle) return
-        await this.lockHandle.close().catch(() => {})
-        this.lockHandle = undefined
-        await unlink(this.lockPath).catch(() => {})
-    }
-
     protected async removeStorageFiles() {
         await unlink(this.path).catch(() => {})
         await unlink(this.bucketPath).catch(() => {})
@@ -710,14 +680,4 @@ function streamReady(s: WriteStream) {
 
 function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
     return mv?.v !== undefined || mv?.file || mv?.bucket
-}
-
-function isPidAlive(pid: number) {
-    try {
-        process.kill(pid, 0)
-        return true
-    }
-    catch (e: any) {
-        return e?.code === 'EPERM'
-    }
 }

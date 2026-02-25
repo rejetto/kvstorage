@@ -155,28 +155,21 @@ async function test() {
                 assert(localDecodeErrors > 0, `truncated tail detected ${localDecodeErrors}`)
                 await truncated.unlink()
             })
-            await measure('lock-regression', async () => {
+            await measure('multi-open-regression', async () => {
                 const FN = 'lock.db'
                 const first = new KvStorage({ rewriteOnOpen: false })
                 await first.open(FN, { clear: true })
                 const second = new KvStorage({ rewriteOnOpen: false })
-                const lockError = await second.open(FN).then(() => '', String)
-                assert(lockError.includes('storage locked'), 'lock blocks second instance')
-                const unlocked = new KvStorage({ rewriteOnOpen: false, crossProcessLock: false })
-                await unlocked.open(FN)
-                assert(unlocked.isOpen(), 'opt-out lock allows parallel open')
-                await unlocked.close()
-                await first.close()
                 await second.open(FN)
+                assert(first.isOpen() && second.isOpen(), 'multiple instances can open same storage')
                 await second.put('k', 'v')
-                assert(await second.get('k') === 'v', 'second instance opens after release')
+                assert(await second.get('k') === 'v', 'second instance can write')
                 await second.close()
-                writeFileSync(FN + '.lock', '9999999')
-                const stale = new KvStorage({ rewriteOnOpen: false })
-                // This simulates a crashed writer that left a stale lock file behind.
-                await stale.open(FN)
-                assert(stale.isOpen(), 'stale lock recovered')
-                await stale.unlink()
+                await first.close()
+                const reloaded = new KvStorage({ rewriteOnOpen: false })
+                await reloaded.open(FN)
+                assert(await reloaded.get('k') === 'v', 'value persists after reopening')
+                await reloaded.unlink()
             })
             await measure('rewrite-bucket-repeat-regression', async () => {
                 const FN = 'rewrite-bucket-repeat.db'
