@@ -271,6 +271,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async unlink() {
         if (this.isDeleting || !this.path) return
+        await this.lockWrite
         this.isDeleting = true
         await this.close()
         await this.removeStorageFiles()
@@ -410,6 +411,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     rewrite() {
         return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
+            if (this.isDeleting)
+                return this.rewritePending = undefined
             this.emit('rewrite', this.rewritePending)
             const {path} = this
             const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
@@ -434,7 +437,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     rewriteBucket() {
         return this.rewriteBucketPending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
-            this.emit('rewriteBucket')
+            if (this.isDeleting)
+                return this.rewriteBucketPending = undefined
+            this.emit('rewriteBucket', this.rewriteBucketPending)
             const {bucketPath: path} = this
             const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
             let f: typeof this.bucketStream
@@ -473,7 +478,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     protected async load(): Promise<void> {
         try {
-            // check if tail contains CR. first line is checked in the for-loop
+            this.files.clear()
+            this.wouldSave = 0 // calculate how much we'd save by rewriting
+            this.mapRealSize = this.bucketWouldSave = this.fileSize = this.bucketSize = 0 // reset
+            this.map.clear()
+            // check if tail contains CR. the first line is checked in the for-loop
             const {size} = await stat(this.path)
             if (size > 1) {
                 const lastTerminator = await stream2buffer(createReadStream(this.path, { start: size - 2, end: size - 1 }))
@@ -485,9 +494,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             const rl = readline.createInterface({ input })
             let filePos = 0 // track where we are, to make Offloaded
             let nextFilePos = 0
-            this.files.clear()
-            this.wouldSave = 0 // calculate how much we'd save by rewriting
-            this.mapRealSize = 0
             let newlineSize = 0
             for await (const line of rl) {
                 const lineBytes = getUtf8Size(line)
@@ -673,8 +679,14 @@ export function getUtf8Size(s: string) {
 
 async function replaceFile(old: string, new_: string) {
     const temp = old + DELETE_ME + randomId()
-    await rename(old, temp) // in case the file is locked by another process, we first make the name available
+    const haveTemp = await rename(old, temp) // in case the file is locked by another process, we first make the name available
+        .then(() => true, e => {
+            if (e.code === 'ENOENT') // not a problem, we mean to delete it anyway
+                return false
+            throw e
+        })
     await rename(new_, old)
+    if (!haveTemp) return
     setTimeout(async () => {
         let retry = 4
         while (retry--) {

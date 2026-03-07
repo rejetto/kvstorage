@@ -1,5 +1,5 @@
 const { KvStorage } = require('.')
-const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync } = require('node:fs')
+const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync } = require('node:fs')
 const { join } = require('path')
 
 test().catch(e => {
@@ -154,6 +154,67 @@ async function test() {
                 assert(await truncated.get('stable') === updatedValue, 'truncated tail keeps offloaded writes working')
                 assert(localDecodeErrors > 0, `truncated tail detected ${localDecodeErrors}`)
                 await truncated.unlink()
+            })
+            await measure('clear-after-close-stale-rewrite-regression', async () => {
+                const FN = 'clear-after-close-stale-rewrite.db'
+                const rewritten = new KvStorage({
+                    rewriteLater: false,
+                    rewriteOnOpen: true,
+                    memoryThreshold: 1_000_000,
+                    bucketThreshold: 1_000_000,
+                    fileThreshold: 1_000_000,
+                })
+                await rewritten.open(FN, { clear: true })
+                await rewritten.put('stable', 'x'.repeat(1000), { delay: 0, maxDelay: 0, maxDelayCreate: 0 })
+                await rewritten.flush()
+                await rewritten.put('stable', 'y', { delay: 0, maxDelay: 0, maxDelayCreate: 0 })
+                await rewritten.flush()
+                await rewritten.close()
+                // clear() reopens immediately: stale rewrite counters from the previous session must not trigger a rewrite against the just-deleted file.
+                await rewritten.clear()
+                assert(existsSync(FN), 'clear after close recreates storage')
+                assert(!readdirSync('.').some(x => x.startsWith(FN + '-delete-me-')), 'clear after close leaves no stale rewrite temp')
+                await rewritten.unlink()
+            })
+            await measure('clear-after-close-stale-bucket-rewrite-regression', async () => {
+                const FN = 'clear-after-close-stale-bucket-rewrite.db'
+                const rewritten = new KvStorage({
+                    rewriteLater: false,
+                    rewriteOnOpen: true,
+                    bucketThreshold: 1,
+                    fileThreshold: 1_000_000,
+                    memoryThreshold: 1_000_000,
+                })
+                await rewritten.open(FN, { clear: true })
+                await rewritten.put('stable', 'first bucket payload', { delay: 0, maxDelay: 0, maxDelayCreate: 0 })
+                await rewritten.flush()
+                await rewritten.put('stable', 'second bucket payload', { delay: 0, maxDelay: 0, maxDelayCreate: 0 })
+                await rewritten.flush()
+                await rewritten.close()
+                // Bucket rewrite counters also belong to the previous session and must not survive clear()+open().
+                await rewritten.clear()
+                assert(existsSync(FN), 'clear after close recreates storage after bucket writes')
+                assert(!existsSync(FN + '-bucket'), 'clear after close does not recreate bucket without entries')
+                await rewritten.unlink()
+            })
+            await measure('unlink-during-rewrite-regression', async () => {
+                const FN = 'unlink-during-rewrite.db'
+                const rewritten = new KvStorage({ rewriteOnOpen: false })
+                await rewritten.open(FN, { clear: true })
+                await rewritten.put('stable', 'first value')
+                await rewritten.put('stable', 'second value')
+                await rewritten.flush()
+                let unlinkPromise
+                rewritten.once('rewrite', () => {
+                    // Queue unlink exactly while rewrite owns lockWrite, so we verify unlink waits instead of deleting under an active swap.
+                    unlinkPromise = rewritten.unlink()
+                })
+                await rewritten.rewrite()
+                await unlinkPromise
+                assert(!existsSync(FN), 'unlink after rewrite removes main file')
+                // replaceFile() removes its old-main temp asynchronously, so wait for the normal cleanup instead of asserting too early.
+                await eventually(() => !readdirSync('.').some(x => x.startsWith(FN + '-delete-me-')))
+                assert(true, 'unlink after rewrite leaves no rewrite temp')
             })
             await measure('multi-open-regression', async () => {
                 const FN = 'lock.db'
@@ -313,4 +374,14 @@ async function measure(label, cb) {
     const t = Date.now()
     await cb()
     console.log('FINISHED', label, Date.now() - t, 'ms')
+}
+
+async function eventually(cb, { timeout=3000, interval=50 }={}) {
+    const until = Date.now() + timeout
+    while (Date.now() < until) {
+        if (cb())
+            return
+        await new Promise(res => setTimeout(res, interval))
+    }
+    throw Error('timeout waiting for condition')
 }
