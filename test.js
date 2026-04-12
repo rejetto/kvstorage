@@ -299,6 +299,24 @@ async function test() {
                 assert(!users.has('bob'), 'sublevel put undefined does not keep ghost key')
                 await parent.unlink()
             })
+            await measure('external-file-replace', async () => {
+                const FN2 = 'ext-replace.db'
+                const ext = new KvStorage({ fileThreshold: 10, rewriteOnOpen: false })
+                await ext.open(FN2, { clear: true })
+                const big1 = Buffer.alloc(50, 'A')
+                const big2 = Buffer.alloc(50, 'B')
+                await ext.put('big', big1)
+                await ext.flush()
+                const folder = FN2 + '$'
+                const filesBefore = readdirSync(folder)
+                assert(filesBefore.length === 1, `first external file created: ${filesBefore.length}`)
+                await ext.put('big', big2)
+                await ext.flush()
+                const filesAfter = readdirSync(folder)
+                assert(filesAfter.length === 1, `old external file replaced: ${filesAfter.length}`)
+                assert(big2.equals(await ext.get('big')), 'external file updated value')
+                await ext.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0
