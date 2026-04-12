@@ -16,12 +16,14 @@ type Encodable = undefined | Jsonable<Buffer | Date>
 type Reviver = (k: string, v: any) => any
 type Encoder = (k: string | undefined, v: any, skip: object) => any
 
+// info related to a value of a specific key (not included)
 type MemoryValue<T> = {
     v?: T, offloaded?: number, bucket?: [number, number], file?: string, // mutually exclusive fields: v=DirectValue (in memory), offloaded=OffloadedValue (in main file), bucket=BucketValue (in bucket file), file=ExternalFile (in dedicated file)
     format?: 'json', // only for ExternalFile and BucketValue
     size?: number, // bytes in the main file
-    waited?: number
-    w?: MemoryValue<T>,  // keep a reference to the record currently written on disk
+    waited?: number, // time already waited on this key
+    onDisk?: MemoryValue<T>,  // the record currently written on disk for the same key (may even be self)
+    pendingSince?: number, // timestamp of the last put() while it waits to be written
 }
 
 type IteratorOptions = { startsWith?: string, limit?: number }
@@ -185,70 +187,92 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             throw Error("storage must be open first")
         const was = this.map.get(key)
         if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
-        const will: MemoryValue<T> = { v: value, w: was?.w, waited: was?.waited } // keep reference to what's on disk
-        this.map.set(key, will)
         if (value === undefined)
             this.mapRealSize--
         else if (was?.v === undefined)
             this.mapRealSize++
         const start = Date.now()
-        if (!was?.w || was?.v === undefined) // maxDelayCreate applies both to values never written and missing values
+        if (was?.pendingSince) { // truthy = waiting to start writing
+            // this is an important optimization for bursts of writes: we update existing promise and objects instead of piling up new ones
+            was.v = value
+            was.pendingSince = start
+            return this.lockFlush
+        }
+        const will: MemoryValue<T> = { v: value, onDisk: was?.onDisk, waited: was?.waited, pendingSince: start } // keep reference to what's on disk
+        this.map.set(key, will)
+        const self = this
+        if (!was?.onDisk || was?.v === undefined) // maxDelayCreate applies both to values never written and missing values
             maxDelay = maxDelayCreate ?? maxDelay
         const toWait = Math.max(0, Math.min(delay, maxDelay - (was?.waited || 0)))
-        return this.lockFlush = this.wait(toWait).then(() => this.lockWrite = this.lockWrite.then(async () => {
-            if (this.isDeleting) return
-            if (will.w === will) return // wrote by a rewrite
-            const inMemoryNow = this.map.get(key)
-            if (inMemoryNow !== will) { // we were overwritten
-                if (inMemoryNow && delay) // keep track of the time already waited on the same key
-                    inMemoryNow.waited = (inMemoryNow.waited || 0) + Date.now() - start
-                return
-            }
-            const {folder} = this
-            const oldFile = inMemoryNow?.w?.file // don't use `was` as an async writing could have happened in the meantime
-            if (oldFile)
-                await unlink(join(folder, oldFile))
-            const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
-                let filename = this.keyToFileName(key)
-                const n = this.files.get(filename)
-                this.files.set(filename, (n || 0) + 1)
-                if (n) filename += this.fileCollisionSeparator + n
-                const fullPath = join(folder, filename)
-                await mkdir(dirname(fullPath), { recursive: true })
-                await writeFile(fullPath, content)
-                const newRecord = { file: filename, format, w: inMemoryNow } as const
-                await this.appendRecord(key, newRecord)
-                this.map.set(key, newRecord) // offload
-            }
-            try {
-                const isBuffer = value instanceof Uint8Array
-                if (isBuffer && value.length > this.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
-                    return saveExternalFile(value)
-                // compare with value currently on disk
-                const encodeValue = (v: T | undefined) => v === undefined ? '' : this.encode(v)
-                const {w} = will
-                const encodedOldValue = this.dontWriteSameValue && (
-                    await this.readOffloadedEncoded(w) ?? await this.readBucketEncoded(w) ?? encodeValue(w?.v) )
-                if (isBuffer && value.length > this.bucketThreshold)
-                    // optimized bucket-buffer comparison
-                    return this.dontWriteSameValue && w?.bucket && encodedOldValue instanceof Buffer && encodedOldValue.equals(value)
-                        || this.appendBucket(key, value)
-                const encodedNewValue = encodeValue(value)
-                if (this.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
-                if (encodedNewValue?.length! > this.fileThreshold)
-                    return isBuffer ? saveExternalFile(value) // encoded is bigger, but no reason to not use optimization of simple buffers
-                        : saveExternalFile(encodedNewValue!, 'json')
-                if (encodedNewValue?.length! > this.bucketThreshold)
-                    return this.appendBucket(key, encodedNewValue)
-                const { offset, size } = await this.appendRecord(key, will)
-                if (size > this.memoryThreshold) // once written, consider offloading
-                    this.map.set(key, { offloaded: offset, size, w: will.w })
-            }
-            finally {
-                if (value === undefined)
-                    this.map.delete(key)
-            }
-        }))
+        return this.lockFlush = this.wait(toWait).then(writeLater)
+
+        function writeLater(flushed = false): Promise<unknown> {
+            const totalWaited = (will.waited || 0) + Date.now() - start
+            const idleWaited = Date.now() - (will.pendingSince || start)
+            if (flushed) // flush() is expected to drain pending puts immediately instead of re-arming the coalescing delay.
+                return self.lockWrite = self.lockWrite.then(writeValue)
+            // if the key was updated recently, keep stretching the same pending write until idle>=delay or maxDelay is exhausted
+            if (idleWaited < delay && totalWaited < maxDelay)
+                return self.wait(Math.min(delay - idleWaited, maxDelay - totalWaited)).then(writeLater)
+            return self.lockWrite = self.lockWrite.then(writeValue)
+        }
+
+        async function writeValue() {
+                if (self.isDeleting) return
+                if (will.onDisk === will) return // written by a rewrite()
+                value = will.v
+                will.pendingSince = undefined
+                const inMemoryNow = self.map.get(key)
+                if (inMemoryNow !== will) { // we were overwritten
+                    if (inMemoryNow && delay) // keep track of the time already waited on the same key
+                        inMemoryNow.waited = (inMemoryNow.waited || 0) + Date.now() - start
+                    return
+                }
+                const {folder} = self
+                const oldFile = inMemoryNow?.onDisk?.file // don't use `was` as an async writing could have happened in the meantime
+                if (oldFile)
+                    await unlink(join(folder, oldFile))
+                const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
+                    let filename = self.keyToFileName(key)
+                    const n = self.files.get(filename)
+                    self.files.set(filename, (n || 0) + 1)
+                    if (n) filename += self.fileCollisionSeparator + n
+                    const fullPath = join(folder, filename)
+                    await mkdir(dirname(fullPath), { recursive: true })
+                    await writeFile(fullPath, content)
+                    const newRecord = { file: filename, format, onDisk: inMemoryNow } satisfies MemoryValue<T>
+                    await self.appendRecord(key, newRecord)
+                    self.map.set(key, newRecord) // offload
+                }
+                try {
+                    const asBuffer = value instanceof Uint8Array && value
+                    if (asBuffer && asBuffer.length > self.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
+                        return saveExternalFile(asBuffer)
+                    // compare with value currently on disk
+                    const encodeValue = (v: T | undefined) => v === undefined ? '' : self.encode(v)
+                    const {onDisk} = will
+                    const encodedOldValue = self.dontWriteSameValue && (
+                        await self.readOffloadedEncoded(onDisk) ?? await self.readBucketEncoded(onDisk) ?? encodeValue(onDisk?.v) )
+                    if (asBuffer && asBuffer.length > self.bucketThreshold)
+                        // optimized bucket-buffer comparison
+                        return self.dontWriteSameValue && onDisk?.bucket && encodedOldValue instanceof Buffer && encodedOldValue.equals(asBuffer)
+                            || self.appendBucket(key, asBuffer)
+                    const encodedNewValue = encodeValue(value)
+                    if (self.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
+                    if (encodedNewValue?.length! > self.fileThreshold)
+                        return asBuffer ? saveExternalFile(asBuffer) // encoded is bigger, but no reason to not use optimization of simple buffers
+                            : saveExternalFile(encodedNewValue!, 'json')
+                    if (encodedNewValue?.length! > self.bucketThreshold)
+                        return self.appendBucket(key, encodedNewValue)
+                    const { offset, size } = await self.appendRecord(key, will)
+                    if (size > self.memoryThreshold) // once written, consider offloading
+                        self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
+                }
+                finally {
+                    if (value === undefined)
+                        self.map.delete(key)
+                }
+        }
     }
 
     async get(key: string) {
@@ -367,16 +391,17 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected wait(t: number) {
-        return new Promise<void>(resolve => {
-            if (t <= 0) return resolve()
+        return new Promise<boolean>(resolve => {
+            if (t <= 0) return resolve(false)
             let h: any
-            const cleanStop = () => {
+            const cleanStop = (flushed=false) => {
                 clearTimeout(h)
-                this.removeListener('flush', cleanStop)
-                resolve()
+                this.removeListener('flush', onFlush)
+                resolve(flushed)
             }
+            const onFlush = () => cleanStop(true)
             h = setTimeout(cleanStop, t)
-            this.on('flush', cleanStop)
+            this.on('flush', onFlush)
         })
     }
 
@@ -428,7 +453,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             this.wouldSave = 0
             for (const k of this.map.keys()) {
                 const mv = this.map.get(k)
-                if (!mv || 'v' in mv && mv.v === undefined || !mv.w) continue // no value, or not written yet
+                if (!mv || 'v' in mv && mv.v === undefined || !mv.onDisk) continue // no value, or not written yet
                 const {offset} = await this.appendRecord(k, mv, true)
                 if (mv?.size && mv.offloaded !== undefined)
                     mv.offloaded = offset // just offset has changed
@@ -458,7 +483,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 lastWrite = new Promise(res => f!.write(encoded, res))
                 const size = mv!.bucket![1]
                 const rec: MemoryValue<T> = { bucket: [ofs, size], format: mv!.format }
-                rec.w = rec
+                rec.onDisk = rec
                 newMap.set(k, rec)
                 ofs += size
             }
@@ -536,9 +561,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const mv: MemoryValue<T> = {
                     ...file ? { file, format } : bucket ? { bucket, format } : valueSize > this.memoryThreshold ? { offloaded: filePos } : { v },
                     size: lineBytes,
-                    w: undefined,
+                    onDisk: undefined, // small optimization – V8 should not change the hidden-class in next assignment
                 }
-                mv.w = mv // we are reading, so that's what's on disk
+                mv.onDisk = mv // we are reading, so that's what's on disk
                 this.map.set(k, mv)
                 const wasDefined = isMemoryValueDefined(already)
                 const nowDefined = isMemoryValueDefined(record)
@@ -559,7 +584,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     protected async encodeRecord(k: string, mv: MemoryValue<T>) {
         return await this.readOffloadedEncoded(mv) // offloaded will keep the same key. This is acceptable with current usage.
-            ?? this.encode({ k, ...mv, w: undefined, waited: undefined, size: undefined }, 'v' in mv) // if it's not offloaded, it's DirectValue or ExternalFile
+            ?? this.encode({ k, ...mv, onDisk: undefined, waited: undefined, pendingSince: undefined, size: undefined } satisfies MemoryValue<T> & { k: string },
+                'v' in mv) // if we got 'v' (not offloaded), it's DirectValue or ExternalFile, and we extra encoding work may be necessary
     }
 
     // NB: this must be called only from within a lockWrite
@@ -570,17 +596,17 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             throw Error(`invalid encoded record for key ${JSON.stringify(key)}`)
         const res = await this.appendLine(line)
         this.emit('wrote', { key, rewriting, value: mv.v })
-        if (!rewriting && mv !== mv.w) {
-            this.wouldSave += mv.w?.size ?? 0
+        if (!rewriting && mv !== mv.onDisk) {
+            this.wouldSave += mv.onDisk?.size ?? 0
             if (mv && 'v' in mv && mv.v === undefined)
                 this.wouldSave += res.size
-            this.bucketWouldSave += this.map.get(key)?.w?.bucket?.[1] ?? 0
+            this.bucketWouldSave += this.map.get(key)?.onDisk?.bucket?.[1] ?? 0
             if (this.rewriteLater)
                 void this.considerRewrite()
         }
         mv.waited = undefined // reset
         mv.size = res.size
-        mv.w = mv
+        mv.onDisk = mv
         return res
     }
 
@@ -649,7 +675,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         const rec: MemoryValue<T> = {
             bucket: [this.bucketSize, size],
             format: isString ? 'json' : undefined,
-            w: undefined
+            onDisk: undefined
         }
         this.bucketSize += size
         await this.appendRecord(key, rec)

@@ -325,9 +325,23 @@ async function test() {
                 const h = setInterval(() => db.put(K, ++insteadOf, { delay: 200, maxDelay: 1000, maxDelayCreate: 0 }), 100)
                 setTimeout(() => {
                     clearInterval(h)
-                    assert(wrote === 3, `often ${wrote}/${insteadOf}`)
+                    assert(wrote === 2, `often ${wrote}/${insteadOf}`)
                     db.flush().then(() => res(insteadOf))
                 }, 1800)
+            })
+            await measure('coalescing', async () => {
+                const hot = new KvStorage({ defaultPutDelay: 1000, maxPutDelay: 1000, maxPutDelayCreate: 1000 })
+                await hot.open(FN + '-hot', { clear: true })
+                for (let i = 0; i < 50; i++)
+                    hot.put('same-key', i)
+                assert(hot.listenerCount('flush') <= 1, `coalescing failed: ${hot.listenerCount('flush')} flush listeners`)
+                await hot.flush()
+                assert(await hot.get('same-key') === 49, 'coalesced final value')
+                hot.put('same-key', 50)
+                await hot.flush()
+                assert(await hot.get('same-key') === 50, 'coalesced update after flush')
+                assert(!readFileSync(FN + '-hot', 'utf8').includes('"pending"'), 'pending is not persisted')
+                await hot.unlink()
             })
             const MUL = 10000
             const BN = MUL / 10
@@ -380,6 +394,7 @@ async function test() {
             assert(finalSize === 541908 + extra, `final size ${finalSize}`)
             assert(decodeErrors === 0, `errorDecoding ${decodeErrors}`)
             console.log('final size: ', finalSize.toLocaleString())
+            await db.close()
         })
     }
     finally {

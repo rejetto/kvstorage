@@ -7,7 +7,7 @@
 - Zero dependencies
 - Small bundle size (~14KB minified)
 - Typescript + Javascript
-- Concurrency is not supported (i.e. no multiple processes on the same file)
+- Opening the same database path from multiple KvStorage instances or processes at the same time is not supported
 - Throttled writings to file
 
 This class was designed to store small/medium data sets of JSON-able data types plus Date and Buffer,
