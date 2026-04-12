@@ -159,7 +159,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async close() {
         await this.flush()
+        if (this.fileStream)
+            await new Promise(res => this.fileStream!.close(res))
         this.fileStream = undefined
+        if (this.bucketStream)
+            await new Promise(res => this.bucketStream!.close(res))
+        this.bucketStream = undefined
         this._isOpen = false
         this.map.clear()
     }
