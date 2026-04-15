@@ -161,20 +161,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async close() {
         await this.flush()
+        this._isOpen = false // flush can take new put() calls, but now the time is over
         if (this.fileStream)
             await new Promise(res => this.fileStream!.close(res))
         this.fileStream = undefined
         if (this.bucketStream)
             await new Promise(res => this.bucketStream!.close(res))
         this.bucketStream = undefined
-        this._isOpen = false
         this.map.clear()
     }
 
     flush(): typeof this.lockFlush {
         this.emit('flush')
         const current = this.lockFlush // wait lockFlush, because a write may have been delayed and only then lockWrite will be set
-        return current.then(() => this.lockFlush === current || this.flush()) // more could happen in the meantime
+        return current.then(() => this.lockFlush === current || this.flush()) // if more puts arrived meanwhile, recur and emit 'flush' again so the new pending writes skip waiting
     }
 
     async clear() {
@@ -184,7 +184,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
         if (!this._isOpen)
-            throw Error("storage must be open first")
+            throw Error("storage not open")
         const was = this.map.get(key)
         if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
         if (value === undefined)
@@ -218,60 +218,60 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         }
 
         async function writeValue() {
-                if (self.isDeleting) return
-                if (will.onDisk === will) return // written by a rewrite()
-                value = will.v
-                will.pendingSince = undefined
-                const inMemoryNow = self.map.get(key)
-                if (inMemoryNow !== will) { // we were overwritten
-                    if (inMemoryNow && delay) // keep track of the time already waited on the same key
-                        inMemoryNow.waited = (inMemoryNow.waited || 0) + Date.now() - start
-                    return
-                }
-                const {folder} = self
-                const oldFile = inMemoryNow?.onDisk?.file // don't use `was` as an async writing could have happened in the meantime
-                if (oldFile)
-                    await unlink(join(folder, oldFile))
-                const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
-                    let filename = self.keyToFileName(key)
-                    const n = self.files.get(filename)
-                    self.files.set(filename, (n || 0) + 1)
-                    if (n) filename += self.fileCollisionSeparator + n
-                    const fullPath = join(folder, filename)
-                    await mkdir(dirname(fullPath), { recursive: true })
-                    await writeFile(fullPath, content)
-                    const newRecord = { file: filename, format, onDisk: inMemoryNow } satisfies MemoryValue<T>
-                    await self.appendRecord(key, newRecord)
-                    self.map.set(key, newRecord) // offload
-                }
-                try {
-                    const asBuffer = value instanceof Uint8Array && value
-                    if (asBuffer && asBuffer.length > self.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
-                        return saveExternalFile(asBuffer)
-                    // compare with value currently on disk
-                    const encodeValue = (v: T | undefined) => v === undefined ? '' : self.encode(v)
-                    const {onDisk} = will
-                    const encodedOldValue = self.dontWriteSameValue && (
-                        await self.readOffloadedEncoded(onDisk) ?? await self.readBucketEncoded(onDisk) ?? encodeValue(onDisk?.v) )
-                    if (asBuffer && asBuffer.length > self.bucketThreshold)
-                        // optimized bucket-buffer comparison
-                        return self.dontWriteSameValue && onDisk?.bucket && encodedOldValue instanceof Buffer && encodedOldValue.equals(asBuffer)
-                            || self.appendBucket(key, asBuffer)
-                    const encodedNewValue = encodeValue(value)
-                    if (self.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
-                    if (encodedNewValue?.length! > self.fileThreshold)
-                        return asBuffer ? saveExternalFile(asBuffer) // encoded is bigger, but no reason to not use optimization of simple buffers
-                            : saveExternalFile(encodedNewValue!, 'json')
-                    if (encodedNewValue?.length! > self.bucketThreshold)
-                        return self.appendBucket(key, encodedNewValue)
-                    const { offset, size } = await self.appendRecord(key, will)
-                    if (size > self.memoryThreshold) // once written, consider offloading
-                        self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
-                }
-                finally {
-                    if (value === undefined)
-                        self.map.delete(key)
-                }
+            if (self.isDeleting) return
+            if (will.onDisk === will) return // written by a rewrite()
+            value = will.v
+            will.pendingSince = undefined
+            const inMemoryNow = self.map.get(key)
+            if (inMemoryNow !== will) { // we were overwritten
+                if (inMemoryNow && delay) // keep track of the time already waited on the same key
+                    inMemoryNow.waited = (inMemoryNow.waited || 0) + Date.now() - start
+                return
+            }
+            const {folder} = self
+            const oldFile = inMemoryNow?.onDisk?.file // don't use `was` as an async writing could have happened in the meantime
+            if (oldFile)
+                await unlink(join(folder, oldFile))
+            const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
+                let filename = self.keyToFileName(key)
+                const n = self.files.get(filename)
+                self.files.set(filename, (n || 0) + 1)
+                if (n) filename += self.fileCollisionSeparator + n
+                const fullPath = join(folder, filename)
+                await mkdir(dirname(fullPath), { recursive: true })
+                await writeFile(fullPath, content)
+                const newRecord = { file: filename, format, onDisk: inMemoryNow } satisfies MemoryValue<T>
+                await self.appendRecord(key, newRecord)
+                self.map.set(key, newRecord) // offload
+            }
+            try {
+                const asBuffer = value instanceof Uint8Array && value
+                if (asBuffer && asBuffer.length > self.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
+                    return saveExternalFile(asBuffer)
+                // compare with value currently on disk
+                const encodeValue = (v: T | undefined) => v === undefined ? '' : self.encode(v)
+                const {onDisk} = will
+                const encodedOldValue = self.dontWriteSameValue && (
+                    await self.readOffloadedEncoded(onDisk) ?? await self.readBucketEncoded(onDisk) ?? encodeValue(onDisk?.v) )
+                if (asBuffer && asBuffer.length > self.bucketThreshold)
+                    // optimized bucket-buffer comparison
+                    return self.dontWriteSameValue && onDisk?.bucket && encodedOldValue instanceof Buffer && encodedOldValue.equals(asBuffer)
+                        || self.appendBucket(key, asBuffer)
+                const encodedNewValue = encodeValue(value)
+                if (self.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
+                if (encodedNewValue?.length! > self.fileThreshold)
+                    return asBuffer ? saveExternalFile(asBuffer) // encoded is bigger, but no reason to not use optimization of simple buffers
+                        : saveExternalFile(encodedNewValue!, 'json')
+                if (encodedNewValue?.length! > self.bucketThreshold)
+                    return self.appendBucket(key, encodedNewValue)
+                const { offset, size } = await self.appendRecord(key, will)
+                if (size > self.memoryThreshold) // once written, consider offloading
+                    self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
+            }
+            finally {
+                if (value === undefined)
+                    self.map.delete(key)
+            }
         }
     }
 
