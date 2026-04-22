@@ -739,5 +739,5 @@ function streamReady(s: WriteStream) {
 }
 
 function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
-    return mv?.v !== undefined || mv?.file || mv?.bucket
+    return mv?.v !== undefined || mv?.offloaded !== undefined || mv?.file || mv?.bucket
 }

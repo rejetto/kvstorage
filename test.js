@@ -135,6 +135,17 @@ async function test() {
                 assert(await mixed.get('target') === 'Y', 'mixed newline rewrite+put')
                 await mixed.unlink()
             })
+            await measure('offloaded-key-apis-regression', async () => {
+                const kv = new KvStorage({ memoryThreshold: 1, bucketThreshold: 1_000_000, fileThreshold: 1_000_000, rewriteOnOpen: false })
+                await kv.open('offloaded-key-apis.db', { clear: true })
+                await kv.put('offloaded', 'xx')
+                await kv.flush()
+                assert(await kv.get('offloaded') === 'xx', 'offloaded get')
+                assert(kv.has('offloaded'), 'offloaded has')
+                assert(Array.from(kv.keys()).includes('offloaded'), 'offloaded keys')
+                assert((await kv.asObject()).offloaded === 'xx', 'offloaded asObject')
+                await kv.unlink()
+            })
             await measure('truncated-tail-regression', async () => {
                 const FN = 'truncated-tail.db'
                 const truncated = new KvStorage({ memoryThreshold: 1, rewriteOnOpen: false })
