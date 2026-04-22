@@ -387,7 +387,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     keyToFileName(key: string) {
-        return key.replace(/[^\w./]/g, '').slice(0, 10) || 'f'
+        const filename = key.replace(/[^\w./]/g, '').slice(0, 10)
+        // path-control segments must not reach join(), while ordinary dots and subfolders stay supported
+        return filename.split('/').filter(segment => segment && segment !== '.' && segment !== '..').join('/') || 'f'
     }
 
     protected wait(t: number) {

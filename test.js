@@ -333,6 +333,21 @@ async function test() {
                 assert((await kv.get('abcdefghij3')).toString() === 'three', 'external file collision writes new suffix')
                 await kv.unlink()
             })
+            await measure('external-file-default-name-prevents-traversal', async () => {
+                const FN2 = 'ext-default-name.db'
+                const outside = 'escapeF'
+                if (existsSync(outside))
+                    unlinkSync(outside)
+                const kv = new KvStorage({ fileThreshold: 1, bucketThreshold: 1_000_000, memoryThreshold: 1_000_000, rewriteOnOpen: false })
+                await kv.open(FN2, { clear: true })
+                await kv.put('../escapeFile', Buffer.from('safe'))
+                await kv.put('a/b.c', Buffer.from('nested'))
+                await kv.flush()
+                assert(!existsSync(outside), 'default external filename prevents traversal')
+                assert(existsSync(join(FN2 + '$', 'a', 'b.c')), 'default external filename keeps subfolders')
+                assert((await kv.get('../escapeFile')).toString() === 'safe', 'default external filename remains readable')
+                await kv.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0
