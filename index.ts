@@ -284,7 +284,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         const rec = this.map.get(key)
         if (!rec) return
         return await this.readExternalFile(rec) // if it is, it's surely not undefined
-            ?? await this.readBucketEncoded(rec)
+            ?? await this.readBucketValue(rec)
             ?? await this.readOffloadedValue(rec)
             ?? rec.v
     }
@@ -416,6 +416,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         const [o,n] = v.bucket
         const stream = createReadStream(this.bucketPath, { start: o, end: o + n - 1 })
         return v.format === 'json' ? stream2string(stream) : stream2buffer(stream)
+    }
+
+    protected async readBucketValue(v: MemoryValue<T> | undefined) {
+        const encoded = await this.readBucketEncoded(v)
+        if (encoded === undefined) return
+        return v?.format === 'json' && typeof encoded === 'string' ? this.decode(encoded) : encoded
     }
 
     protected readOffloadedEncoded(v: MemoryValue<T> | undefined) {
