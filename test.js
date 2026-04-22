@@ -317,6 +317,22 @@ async function test() {
                 assert(big2.equals(await ext.get('big')), 'external file updated value')
                 await ext.unlink()
             })
+            await measure('external-file-collision-after-reopen', async () => {
+                const FN2 = 'ext-collision-reopen.db'
+                let kv = new KvStorage({ fileThreshold: 1, bucketThreshold: 1_000_000, memoryThreshold: 1_000_000, rewriteOnOpen: false })
+                await kv.open(FN2, { clear: true })
+                await kv.put('abcdefghij1', Buffer.from('one'))
+                await kv.put('abcdefghij2', Buffer.from('two'))
+                await kv.flush()
+                await kv.close()
+                kv = new KvStorage({ fileThreshold: 1, bucketThreshold: 1_000_000, memoryThreshold: 1_000_000, rewriteOnOpen: false })
+                await kv.open(FN2)
+                await kv.put('abcdefghij3', Buffer.from('three'))
+                await kv.flush()
+                assert((await kv.get('abcdefghij2')).toString() === 'two', 'external file collision survives reopen')
+                assert((await kv.get('abcdefghij3')).toString() === 'three', 'external file collision writes new suffix')
+                await kv.unlink()
+            })
             const lastOften = await new Promise(res => {
                 const K = 'often'
                 let wrote = 0

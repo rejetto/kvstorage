@@ -550,11 +550,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const { k, v, file, format, bucket } = record
                 if (file) { // rebuild this.files
                     // we don't rely on using the current keyToFileName, as we allow having used a different one in the past
-                    let [base, n] = file.split(this.fileCollisionSeparator)
+                    const [base, n] = file.split(this.fileCollisionSeparator)
                     const was = this.files.get(base)
-                    n = Number(n) || 0
-                    if (!was || n > was)
-                        this.files.set(base, n)
+                    const next = (Number(n) || 0) + 1 // files stores the next suffix to allocate, not the highest suffix seen on disk
+                    if (!was || next > was)
+                        this.files.set(base, next)
                 }
                 const already = this.map.get(k)
                 this.wouldSave += already?.size || 0
