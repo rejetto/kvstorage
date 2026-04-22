@@ -187,10 +187,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             throw Error("storage not open")
         const was = this.map.get(key)
         if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
-        if (value === undefined)
-            this.mapRealSize--
-        else if (was?.v === undefined)
-            this.mapRealSize++
+        const wasDefined = isMemoryValueDefined(was)
+        const willBeDefined = value !== undefined
+        // keep size tied to key existence, independently from where the value is stored
+        if (wasDefined !== willBeDefined)
+            if (willBeDefined)
+                this.mapRealSize++
+            else
+                this.mapRealSize--
         const start = Date.now()
         if (was?.pendingSince) { // truthy = waiting to start writing
             // this is an important optimization for bursts of writes: we update existing promise and objects instead of piling up new ones

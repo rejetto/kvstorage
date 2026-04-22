@@ -146,6 +146,17 @@ async function test() {
                 assert((await kv.asObject()).offloaded === 'xx', 'offloaded asObject')
                 await kv.unlink()
             })
+            await measure('offloaded-size-overwrite-regression', async () => {
+                const kv = new KvStorage({ memoryThreshold: 1 })
+                await kv.open('offloaded-size-overwrite.db', { clear: true })
+                await kv.put('offloaded', 'xx')
+                assert(kv.size() === 1, 'offloaded size after create')
+                await kv.put('offloaded', 'yy')
+                assert(kv.size() === 1, 'offloaded size after overwrite')
+                await kv.del('offloaded')
+                assert(kv.size() === 0, 'offloaded size after delete')
+                await kv.unlink()
+            })
             await measure('truncated-tail-regression', async () => {
                 const FN = 'truncated-tail.db'
                 const truncated = new KvStorage({ memoryThreshold: 1, rewriteOnOpen: false })
