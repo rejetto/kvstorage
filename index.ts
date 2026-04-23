@@ -269,7 +269,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (encodedNewValue?.length! > self.bucketThreshold)
                     return self.appendBucket(key, encodedNewValue)
                 const { offset, size } = await self.appendRecord(key, will)
-                if (size > self.memoryThreshold) // once written, consider offloading
+                if (getUtf8Size(encodedNewValue) > self.memoryThreshold) // once written, consider offloading
                     self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
             }
             finally {

@@ -157,6 +157,17 @@ async function test() {
                 assert(kv.size() === 0, 'offloaded size after delete')
                 await kv.unlink()
             })
+            await measure('memory-threshold-value-size-regression', async () => {
+                const kv = new KvStorage({ memoryThreshold: 10 })
+                await kv.open('memory-threshold-value-size.db', { clear: true })
+                const longKey = 'long-key-name'.repeat(5)
+                await kv.put(longKey, 'x')
+                // memoryThreshold is intended to measure the encoded value, not the storage record wrapper
+                assert(kv.getSync(longKey) === 'x', 'memory threshold ignores key and wrapper bytes')
+                await kv.put('large', 'x'.repeat(11))
+                assert(await kv.get('large') === 'x'.repeat(11), 'offloaded value still reads after value-size check')
+                await kv.unlink()
+            })
             await measure('bucket-json-decode-regression', async () => {
                 const kv = new KvStorage({ bucketThreshold: 1 })
                 await kv.open('bucket-json-decode.db', { clear: true })
