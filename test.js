@@ -17,7 +17,7 @@ function assert(truth, msg) {
 
 async function test() {
     const bytes = []
-    for (let i = 0; i < 1000; i++) bytes.push(i % 256) // 1000 plus b64 encoding
+    for (let i = 0; i < 1001; i++) bytes.push(i % 256) // just above the default memory threshold
     const bufToOffload = Buffer.from(bytes)
     for (let i = 0; i < 20_000 - bufToOffload.length; i++) bytes.push(i % 256)
     const buf = Buffer.from(bytes)
@@ -162,10 +162,14 @@ async function test() {
                 await kv.open('memory-threshold-value-size.db', { clear: true })
                 const longKey = 'long-key-name'.repeat(5)
                 await kv.put(longKey, 'x')
-                // memoryThreshold is intended to measure the encoded value, not the storage record wrapper
+                // memoryThreshold is intended to measure the value, not the storage record wrapper
                 assert(kv.getSync(longKey) === 'x', 'memory threshold ignores key and wrapper bytes')
                 await kv.put('large', 'x'.repeat(11))
-                assert(await kv.get('large') === 'x'.repeat(11), 'offloaded value still reads after value-size check')
+                assert(await kv.get('large') === 'x'.repeat(11), 'offloaded value still reads after memory-size check')
+                await kv.close()
+                await kv.open('memory-threshold-value-size.db')
+                assert(kv.getSync(longKey) === 'x', 'memory threshold ignores wrapper bytes after reload')
+                assert(await kv.get('large') === 'x'.repeat(11), 'offloaded value still reads after reload')
                 await kv.unlink()
             })
             await measure('bucket-json-decode-regression', async () => {

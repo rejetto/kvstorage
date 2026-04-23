@@ -6,6 +6,7 @@ import { EventEmitter, once } from 'events'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
 import readline from 'readline'
+import { serialize as v8Serialize } from 'v8'
 
 export type Jsonable<EXPAND> = EXPAND | JsonPrimitive | JsonArray<EXPAND> | JsonObject<EXPAND>
 type JsonPrimitive = number | boolean | null | string
@@ -263,13 +264,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                         || self.appendBucket(key, asBuffer)
                 const encodedNewValue = encodeValue(value)
                 if (self.dontWriteSameValue && encodedNewValue === encodedOldValue) return // unchanged, don't save
-                if (encodedNewValue?.length! > self.fileThreshold)
+                const encodedNewValueSize = getUtf8Size(encodedNewValue)
+                if (encodedNewValueSize > self.fileThreshold)
                     return asBuffer ? saveExternalFile(asBuffer) // encoded is bigger, but no reason to not use optimization of simple buffers
                         : saveExternalFile(encodedNewValue!, 'json')
-                if (encodedNewValue?.length! > self.bucketThreshold)
+                if (encodedNewValueSize > self.bucketThreshold)
                     return self.appendBucket(key, encodedNewValue)
                 const { offset, size } = await self.appendRecord(key, will)
-                if (getUtf8Size(encodedNewValue) > self.memoryThreshold) // once written, consider offloading
+                if (getMemorySize(value) > self.memoryThreshold) // once written, consider offloading
                     self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
             }
             finally {
@@ -557,9 +559,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                     this.wouldSave += bytesIncludingNL
                     continue
                 }
-                const wrapSize = getUtf8Size(record.k) + 13 // `{"k":"","v":}`.length
-                const valueSize = lineBytes - wrapSize
                 const { k, v, file, format, bucket } = record
+                const valueSize = getMemorySize(v)
                 if (file) { // rebuild this.files
                     // we don't rely on using the current keyToFileName, as we allow having used a different one in the past
                     const [base, n] = file.split(this.fileCollisionSeparator)
@@ -718,6 +719,15 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
 export function getUtf8Size(s: string) {
     return Buffer.from(s).length
+}
+
+function getMemorySize(v: unknown) {
+    if (v == null) return 0
+    if (v instanceof Uint8Array) return v.length
+    if (typeof v === 'string') return v.length * 2
+    if (typeof v === 'number') return 8
+    if (typeof v === 'boolean') return 4
+    return v8Serialize(v).byteLength // it gives a stable value-only proxy
 }
 
 async function replaceFile(old: string, new_: string) {
