@@ -124,13 +124,15 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   -  make all keys and values into a simple Object.
 - `singleSync<T=any>(key: string, default: T): { get, set, ready }`
   - Creates a simple object-style API for synchronous getting and setting of the value associated with `key`.
-    Be sure to use this only with values that will not exceed any threshold that will cause it to be offloaded.
+    Values may exceed `memoryThreshold` (ignored), but must stay below `bucketThreshold` and `fileThreshold`.
+    Once you use this on a key, you should not use `put` on the same key.
   - The default value is returned when no value is stored.
   - Methods:
     - `get(): T` get the value, but sync.
     - `set(value: T | ((currentValue: T) => T)): T` equivalent to `put`, but also offer a callback version
-      to calculate new value based on the old one. Return the new value.
-    - `ready(): Promise<void>` so you can wait for the API to be ready to receive commands.
+      to calculate new value based on the old one. Return the new value. Throws if the value would need bucket or file storage.
+    - `ready(): Promise<void>` wait for the API to be ready to receive commands. After opening, this also reloads the key
+      into memory if it had been offloaded by `memoryThreshold`.
 
 # File format
 

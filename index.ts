@@ -183,7 +183,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         await this.open(this.path)
     }
 
-    async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate }={}) {
+    async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate, forceSync=false }={}) {
         if (!this._isOpen)
             throw Error("storage not open")
         const was = this.map.get(key)
@@ -271,7 +271,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (encodedNewValueSize > self.bucketThreshold)
                     return self.appendBucket(key, encodedNewValue)
                 const { offset, size } = await self.appendRecord(key, will)
-                if (getMemorySize(value) > self.memoryThreshold) // once written, consider offloading
+                if (!forceSync && getMemorySize(value) > self.memoryThreshold) // once written, consider offloading
                     self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
             }
             finally {
@@ -345,12 +345,25 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     singleSync<ST extends T>(key: string, def: ST) {
         const self = this
         return {
-            async ready() { return self._isOpen || once(self, 'open') },
+            async ready() {
+                await (self._isOpen || once(self, 'open'))
+                const rec = self.map.get(key)
+                if (!rec || 'v' in rec || rec.offloaded === undefined) return // only main-file offloads are safe to rehydrate
+                const v = await self.readOffloadedValue(rec) as ST
+                if (v === undefined) throw Error("singleSync value not ready")
+                self.map.set(key, { v, onDisk: rec }) // restore sync reads after memoryThreshold offloaded the value
+            },
             get() { return self.getSync(key) as ST ?? def },
             set(v: ST | ((was: ST) => ST)) {
                 if (v instanceof Function)
                     v = v(this.get())
-                self.put(key, v)
+                // sync-check; in put it would be async
+                if (v) for (const x of [getUtf8Size(self.encode(v)), v instanceof Uint8Array && v.length || 0])
+                    if (x > self.fileThreshold)
+                        throw Error("singleSync value exceeds fileThreshold")
+                    else if (x > self.bucketThreshold)
+                        throw Error("singleSync value exceeds bucketThreshold")
+                self.put(key, v, { forceSync: true })
                 return v
             },
             toJSON() { return this.get() },
