@@ -162,7 +162,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     async close() {
         await this.flush()
-        this._isOpen = false // flush can take new put() calls, but now the time is over
+        this._isOpen = false // during flush we accept new put() calls, but now the time is over
+        await this.flush() // writes accepted during the first flush can update lockFlush after its snapshot, so drain once more before closing streams
         if (this.fileStream)
             await new Promise(res => this.fileStream!.close(res))
         this.fileStream = undefined
@@ -172,10 +173,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         this.map.clear()
     }
 
-    flush(): typeof this.lockFlush {
+    async flush(): typeof this.lockFlush {
         this.emit('flush')
         const current = this.lockFlush // wait lockFlush, because a write may have been delayed and only then lockWrite will be set
-        return current.then(() => this.lockFlush === current || this.flush()) // if more puts arrived meanwhile, recur and emit 'flush' again so the new pending writes skip waiting
+        await current
+        await this.lockWrite // flushed waits may append several writes to lockWrite before all of them finish
+        return this.lockFlush === current || this.flush() // if more puts arrived meanwhile, recur and emit 'flush' again so the new pending writes skip waiting
     }
 
     async clear() {

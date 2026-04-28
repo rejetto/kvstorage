@@ -320,6 +320,45 @@ async function test() {
                 await eventually(() => !readdirSync('.').some(x => x.startsWith(FN + '-delete-me-')))
                 assert(true, 'unlink after rewrite leaves no rewrite temp')
             })
+            await measure('close-flushes-already-pending-writes-regression', async () => {
+                const FN = 'close-flushes-pending.db'
+                const kv = new KvStorage({ rewriteOnOpen: false })
+                await kv.open(FN, { clear: true })
+                const streamErrors = []
+                kv.fileStream.on('error', e => streamErrors.push(e))
+                kv.put('already-pending-a', 'value-a', { delay: 100, maxDelay: 100, maxDelayCreate: 100 })
+                kv.put('already-pending-b', 'value-b', { delay: 100, maxDelay: 100, maxDelayCreate: 100 })
+                await kv.close()
+                assert(!streamErrors.length, `close stream errors while flushing pending writes: ${streamErrors[0]?.code}`)
+                await kv.open(FN)
+                assert(await kv.get('already-pending-a') === 'value-a', 'close flushed first already-pending write')
+                assert(await kv.get('already-pending-b') === 'value-b', 'close flushed second already-pending write')
+                await kv.unlink()
+            })
+            await measure('close-flushes-put-after-first-flush-regression', async () => {
+                const FN = 'close-flushes-after-first-flush.db'
+                const kv = new KvStorage({ rewriteOnOpen: false })
+                await kv.open(FN, { clear: true })
+                const streamErrors = []
+                let latePutError
+                let latePutDone
+                kv.fileStream.on('error', e => streamErrors.push(e))
+                const close = kv.close()
+                // this microtask runs after the first flush starts, so close must drain it before closing the stream
+                queueMicrotask(() => {
+                    latePutDone = Promise.resolve()
+                        .then(() => kv.put('after-first-flush', 'value', { delay: 0, maxDelay: 0, maxDelayCreate: 0 }))
+                        .catch(e => latePutError = e)
+                })
+                await close
+                await latePutDone
+                await new Promise(res => setTimeout(res, 50))
+                assert(!latePutError, `late put error: ${latePutError?.message}`)
+                assert(!streamErrors.length, `late put reached closed stream: ${streamErrors[0]?.code}`)
+                await kv.open(FN)
+                assert(await kv.get('after-first-flush') === 'value', 'late put was persisted before close')
+                await kv.unlink()
+            })
             await measure('multi-open-regression', async () => {
                 const FN = 'lock.db'
                 const first = new KvStorage({ rewriteOnOpen: false })
