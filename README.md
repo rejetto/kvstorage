@@ -1,19 +1,30 @@
 # KvStorage
 
-- Persistent key-value storage
+- Persistent key-value storage for Node.js
 - Node.js only, 16+ (no browser)
-- API inspired by levelDB
-- All keys are kept in memory
+- API inspired by LevelDB
 - Zero dependencies
 - Small bundle size (~14KB minified)
-- Typescript + Javascript
+- TypeScript + JavaScript
+- All keys are kept in memory
+- Small values are kept in memory; large values are loaded on demand
+- Append-only, log-structured writes with periodic compaction
+- Throttled writes to disk
+- Crash-safe compaction/rewrite
 - Opening the same database path from multiple KvStorage instances or processes at the same time is not supported
-- Throttled writings to file
 
-This class was designed to store small/medium data sets of JSON-able data types plus Date and Buffer,
-where you can have the luxury of keeping keys in memory.
-Small values are kept in memory as well (configurable threshold), while big ones are loaded on-demand.
-You can fine-tune this to match your memory-usage vs performance on reading.
+KvStorage was designed to store small/medium data sets of JSON-serializable values, plus `Date` and `Buffer`, when keeping all keys in memory is acceptable.
+
+Small values are kept in memory as well, using a configurable threshold. Larger values are persisted separately and loaded on demand. This lets you tune the tradeoff between memory usage and read performance.
+
+Writes are appended to disk and compacted periodically, avoiding full-file rewrites on every update. Interrupted appends are ignored on reopen when they result in incomplete or malformed records.
+
+By default, KvStorage does not fsync every write. This keeps writes lightweight, but means confirmed writes may still be lost after an operating-system crash or power loss, depending on the filesystem and OS buffering.
+
+## Why
+
+This lib was created after evaluating persistence libraries in 2024 and not finding one that matched the combination of constraints listed above.
+It is meant for the gap between plain JSON-file storage and full embedded databases.
 
 # Installation
 

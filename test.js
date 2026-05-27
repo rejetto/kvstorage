@@ -1,5 +1,5 @@
 const { KvStorage } = require('.')
-const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync } = require('node:fs')
+const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync, renameSync } = require('node:fs')
 const { join } = require('path')
 
 test().catch(e => {
@@ -277,7 +277,7 @@ async function test() {
                 // clear() reopens immediately: stale rewrite counters from the previous session must not trigger a rewrite against the just-deleted file.
                 await kv.clear()
                 assert(existsSync(FN), 'clear after close recreates storage')
-                assert(!readdirSync('.').some(x => x.startsWith(FN + '-delete-me-')), 'clear after close leaves no stale rewrite temp')
+                assert(!existsSync(FN + '.old') && !existsSync(FN + '.new'), 'clear after close leaves no stale rewrite temp')
                 await kv.unlink()
             })
             await measure('clear-after-close-stale-bucket-rewrite-regression', async () => {
@@ -316,9 +316,7 @@ async function test() {
                 await kv.rewrite()
                 await unlinkPromise
                 assert(!existsSync(FN), 'unlink after rewrite removes main file')
-                // replaceFile() removes its old-main temp asynchronously, so wait for the normal cleanup instead of asserting too early.
-                await eventually(() => !readdirSync('.').some(x => x.startsWith(FN + '-delete-me-')))
-                assert(true, 'unlink after rewrite leaves no rewrite temp')
+                assert(!existsSync(FN + '.old') && !existsSync(FN + '.new'), 'unlink after rewrite leaves no rewrite temp')
             })
             await measure('close-flushes-already-pending-writes-regression', async () => {
                 const FN = 'close-flushes-pending.db'
@@ -377,9 +375,9 @@ async function test() {
             })
             await measure('cleanup-on-open-isolation-regression', async () => {
                 const base = 'cleanup.db'
-                const ownMainTemp = base + '-delete-me-own'
-                const ownBucketTemp = base + '-bucket-delete-me-own'
-                const siblingTemp = base + '2-delete-me-sibling'
+                const ownMainTemp = base + '.new'
+                const ownBucketTemp = base + '-bucket.new'
+                const siblingTemp = base + '2.new'
                 for (const f of [ownMainTemp, ownBucketTemp, siblingTemp])
                     if (readdirSync('.').includes(f))
                         unlinkSync(f)
@@ -395,6 +393,73 @@ async function test() {
                 await cleanup.unlink()
                 unlinkSync(siblingTemp)
             })
+            await measure('clear-removes-recovery-files-regression', async () => {
+                const path = 'clear-recovery.db'
+                const replacements = ['.old', '.new', '-bucket.old', '-bucket.new'].map(suffix => path + suffix)
+                for (const cleanupOnOpen of [true, false]) {
+                    for (const file of replacements)
+                        writeFileSync(file, JSON.stringify({ k: 'stale', v: 'must be deleted' }) + '\n')
+                    const kv = new KvStorage({ rewriteOnOpen: false, cleanupOnOpen })
+                    await kv.open(path, { clear: true })
+                    assert(kv.size() === 0, 'clear does not recover deleted values')
+                    assert(!replacements.some(existsSync), 'clear removes main and bucket recovery files')
+                    assert(!existsSync(path + '-bucket'), 'clear does not recover a stale bucket')
+                    await kv.unlink()
+                }
+            })
+            await measure('main-rewrite-recovery-regression', async () => {
+                const FN2 = 'main-rewrite-recovery.db'
+                const oldMain = JSON.stringify({ k: 'k', v: 'old' }) + '\n'
+                const newMain = JSON.stringify({ k: 'k', v: 'new' }) + '\n'
+                for (const f of [FN2, FN2 + '.old', FN2 + '.new'])
+                    if (existsSync(f))
+                        unlinkSync(f)
+                writeFileSync(FN2 + '.old', oldMain)
+                writeFileSync(FN2 + '.new', newMain)
+                const kv = new KvStorage({ rewriteOnOpen: false })
+                await kv.open(FN2)
+                assert(await kv.get('k') === 'old', 'main recovery prefers old when official file is missing')
+                assert(!existsSync(FN2 + '.new'), 'main recovery removes uncommitted new temp')
+                await kv.unlink()
+            })
+            await measure('main-new-only-recovery-regression', async () => {
+                const FN2 = 'main-new-only-recovery.db'
+                for (const f of [FN2, FN2 + '.old', FN2 + '.new'])
+                    if (existsSync(f))
+                        unlinkSync(f)
+                writeFileSync(FN2 + '.new', JSON.stringify({ k: 'k', v: 'new only' }) + '\n')
+                const kv = new KvStorage({ rewriteOnOpen: false })
+                await kv.open(FN2)
+                assert(await kv.get('k') === 'new only', 'main recovery promotes valid new when it is the only complete source')
+                await kv.unlink()
+            })
+            await measure('bucket-rewrite-recovery-regression', async () => {
+                const path = 'bucket-rewrite-recovery.db'
+                const obsolete = JSON.stringify('obsolete bucket payload')
+                const live = JSON.stringify('live bucket payload')
+                const oldMain = JSON.stringify({ k: 'k', bucket: [obsolete.length, live.length], format: 'json' }) + '\n'
+                const newMain = oldMain + JSON.stringify({ k: 'k', bucket: [0, live.length], format: 'json' }) + '\n'
+                const renames = [
+                    [path, path + '.old'],
+                    [path + '-bucket', path + '-bucket.old'],
+                    [path + '-bucket.new', path + '-bucket'],
+                    [path + '.new', path],
+                ]
+                for (let step = 0; step <= renames.length; step++) {
+                    writeFileSync(path, oldMain)
+                    writeFileSync(path + '-bucket', obsolete + live)
+                    writeFileSync(path + '.new', newMain)
+                    writeFileSync(path + '-bucket.new', live)
+                    // each prefix leaves exactly the files that survive an interruption between renames
+                    for (const [from, to] of renames.slice(0, step))
+                        renameSync(from, to)
+                    const kv = new KvStorage({ rewriteOnOpen: false })
+                    await kv.open(path)
+                    assert(await kv.get('k') === 'live bucket payload', `bucket recovery preserves matching offsets at step ${step}`)
+                    assert(!['.old', '.new', '-bucket.old', '-bucket.new'].some(suffix => existsSync(path + suffix)), 'bucket recovery removes replacement files')
+                    await kv.unlink()
+                }
+            })
             await measure('rewrite-bucket-repeat-regression', async () => {
                 const FN = 'rewrite-bucket-repeat.db'
                 const kv = new KvStorage({ rewriteOnOpen: false, bucketThreshold: 1, fileThreshold: 1_000_000 })
@@ -408,6 +473,21 @@ async function test() {
                 await kv.flush()
                 await kv.rewriteBucket()
                 assert(rewriteBucketCount === 2, `rewrite bucket count ${rewriteBucketCount}`)
+                await kv.unlink()
+            })
+            await measure('empty-bucket-rewrite-regression', async () => {
+                const path = 'empty-bucket-rewrite.db'
+                const kv = new KvStorage({ rewriteOnOpen: false })
+                const value = Buffer.alloc(3_000, 'a')
+                await kv.open(path, { clear: true })
+                await kv.put('old', value)
+                await kv.del('old')
+                await kv.rewriteBucket()
+                assert(!existsSync(path + '-bucket'), 'empty bucket is removed before rewrite completes')
+                await kv.put('new', value)
+                await kv.close()
+                await kv.open(path)
+                assert(value.equals(await kv.get('new')), 'new bucket value survives rewrite and reopen')
                 await kv.unlink()
             })
             await measure('sublevel-preexisting-keys-regression', async () => {
@@ -579,14 +659,4 @@ async function measure(label, cb) {
     const t = Date.now()
     await cb()
     console.log('FINISHED', label, Date.now() - t, 'ms')
-}
-
-async function eventually(cb, { timeout=3000, interval=50 }={}) {
-    const until = Date.now() + timeout
-    while (Date.now() < until) {
-        if (cb())
-            return
-        await new Promise(res => setTimeout(res, interval))
-    }
-    throw Error('timeout waiting for condition')
 }

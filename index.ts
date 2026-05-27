@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { unlink, rename, mkdir, writeFile, rm, stat, opendir } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
-import { basename, dirname, join } from 'path'
+import { dirname, join } from 'path'
 import { EventEmitter, once } from 'events'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
@@ -33,8 +33,6 @@ type OptionFields = 'memoryThreshold' | 'bucketThreshold' | 'fileThreshold' | 'r
     | 'dontWriteSameValue' | 'fileCollisionSeparator' | 'keyToFileName' | 'cleanupOnOpen'
 
 export type KvStorageOptions<T=Encodable> = Partial<Pick<KvStorage<T>, OptionFields>>
-
-const DELETE_ME = '-delete-me-'
 
 // persistent key-value storage functionality with an API inspired by levelDB
 export class KvStorage<T=Encodable> extends EventEmitter {
@@ -132,15 +130,19 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 this.bucketPath = path + '-bucket'
                 if (clear)
                     await this.removeStorageFiles().catch(() => {})
-                if (this.cleanupOnOpen) {
-                    const folder = dirname(path)
-                    const base = basename(path)
-                    const mainTempPrefix = base + DELETE_ME
-                    const bucketTempPrefix = base + '-bucket' + DELETE_ME
-                    for await (const {name} of await opendir(folder).catch(() => []))
-                        if (name.startsWith(mainTempPrefix) || name.startsWith(bucketTempPrefix))
-                            await unlink(join(folder, name)).catch(() => {}) // best effort
+                // recover replacement files
+                const main = await getReplacementState(this.path)
+                const bucket = await getReplacementState(this.bucketPath)
+                if (!main.path && main.old && main.new && bucket.path && bucket.old && !bucket.new) {
+                    await validateMainFile(newPath(this.path))
+                    // bucket rewrite promotes the bucket first; in this state the only consistent recovery is to finish promoting the matching main snapshot
+                    await rename(newPath(this.path), this.path)
+                    await cleanupReplacementFiles(this.path, this.cleanupOnOpen)
+                    await cleanupReplacementFiles(this.bucketPath, this.cleanupOnOpen)
                 }
+                await recoverReplacementFile(this.path, validateMainFile, this.cleanupOnOpen)
+                await recoverReplacementFile(this.bucketPath, undefined, this.cleanupOnOpen)
+
                 this.isDeleting = false
                 await this.load()
                 if (this.rewriteOnOpen)
@@ -475,9 +477,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 return this.rewritePending = undefined
             this.emit('rewrite', this.rewritePending)
             const {path} = this
-            const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
+            const rewriting = newPath(path) // use same volume, to be sure we can rename to destination
             if (this.fileStream?.writable)
-                await new Promise(res => this.fileStream?.close(res))
+                await closeStream(this.fileStream)
+            await prepareReplacement(path)
             this.fileStream = createWriteStream(rewriting, { flags: 'w' })
             this.fileSize = 0
             this.wouldSave = 0
@@ -488,8 +491,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (mv?.size && mv.offloaded !== undefined)
                     mv.offloaded = offset // just offset has changed
             }
+            await closeStream(this.fileStream)
+            await replaceFile(path)
+            this.fileStream = createWriteStream(path, { flags: 'a' })
             await streamReady(this.fileStream)
-            await replaceFile(path, rewriting)
             this.rewritePending = undefined
             void this.flush()
         })
@@ -501,11 +506,15 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 return this.rewriteBucketPending = undefined
             this.emit('rewriteBucket', this.rewriteBucketPending)
             const {bucketPath: path} = this
-            const rewriting = path + DELETE_ME + randomId() // use same volume, to be sure we can rename to destination
+            const rewriting = newPath(path) // use same volume, to be sure we can rename to destination
+            const mainRewriting = newPath(this.path)
             let f: typeof this.bucketStream
             let lastWrite: any
             let ofs = 0
+            let mainWouldSave = 0
             const newMap = new Map(this.map)
+            await prepareReplacement(path)
+            await prepareReplacement(this.path)
             for (const [k, mv] of this.map.entries()) {
                 const encoded = await this.readBucketEncoded(mv)
                 if (!encoded) continue
@@ -515,24 +524,45 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const rec: MemoryValue<T> = { bucket: [ofs, size], format: mv!.format }
                 rec.onDisk = rec
                 newMap.set(k, rec)
+                mainWouldSave += mv?.onDisk?.size ?? 0
                 ofs += size
             }
             await lastWrite
-            for (const [k, v] of newMap.entries())
-                if (v.bucket)
-                    await this.appendRecord(k, v)
-            if (!f) // empty
-                await unlink(path)
-            else {
-                await streamReady(f)
-                await new Promise(res => this.bucketStream?.close(res))
-                await replaceFile(path, rewriting)
+            if (!f) { // empty
+                if (this.bucketStream)
+                    await closeStream(this.bucketStream)
+                await unlinkWithRetry(path) // keep deletion under lockWrite so it cannot remove a bucket reopened by the next put
+                this.bucketStream = undefined
             }
-            this.map = newMap
-            this.bucketStream = f
+            else {
+                if (this.fileStream?.writable)
+                    await closeStream(this.fileStream)
+                await closeStream(f)
+                if (this.bucketStream)
+                    await closeStream(this.bucketStream)
+                await pipeline(createReadStream(this.path), createWriteStream(mainRewriting, { flags: 'w' }))
+                this.fileStream = createWriteStream(mainRewriting, { flags: 'a' })
+                this.fileSize = (await stat(mainRewriting)).size
+                // append bucket coordinates to db.new so the official main and bucket files switch as a recoverable pair
+                for (const [k, v] of newMap.entries())
+                    if (v.bucket && v !== this.map.get(k))
+                        await this.appendRecord(k, v, true)
+                const fileSize = this.fileSize
+                await closeStream(this.fileStream)
+                await replaceFileForPair(this.path, path)
+                this.map = this.mergePendingSnapshot(newMap)
+                this.fileSize = fileSize
+                this.fileStream = createWriteStream(this.path, { flags: 'a' })
+                await streamReady(this.fileStream)
+                this.bucketStream = createWriteStream(path, { flags: 'a' })
+                await streamReady(this.bucketStream)
+            }
+            this.wouldSave += mainWouldSave
             this.bucketSize = ofs
             this.bucketWouldSave = 0
             this.rewriteBucketPending = undefined
+            if (this.rewriteLater)
+                void this.considerRewrite()
         })
     }
 
@@ -694,6 +724,15 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         return { offset, size }
     }
 
+    protected mergePendingSnapshot(snapshot: typeof this.map) {
+        const merged = new Map(snapshot)
+        for (const [k, mv] of this.map.entries())
+            if (mv.pendingSince)
+                // pending writes started while the rewrite was running and still need to see themselves in the live map when their queued writer resumes
+                merged.set(k, mv)
+        return merged
+    }
+
     protected async appendBucket(key: string, what: string | Uint8Array) {
         this.bucketSize ||= await stat(this.bucketPath).then(x => x.size, () => 0)
         this.bucketStream ||= createWriteStream(this.bucketPath, { flags: 'a' })
@@ -712,7 +751,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     protected async normalizeMainFile() {
-        const temp = this.path + DELETE_ME + randomId()
+        const temp = newPath(this.path)
+        await prepareReplacement(this.path)
         await pipeline(
             createReadStream(this.path),
             new Transform({ // we only need canonical newlines in storage files: stripping CR bytes avoids text decoding overhead
@@ -722,10 +762,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             }),
             createWriteStream(temp, { flags: 'w' })
         )
-        await replaceFile(this.path, temp)
+        await replaceFile(this.path)
     }
 
     protected async removeStorageFiles() {
+        await prepareReplacement(this.path) // recovery must not resurrect values after an explicit clear or unlink
+        await prepareReplacement(this.bucketPath)
         await unlink(this.path).catch(() => {})
         await unlink(this.bucketPath).catch(() => {})
         await rm(this.folder,  { recursive: true, force: true })
@@ -746,32 +788,127 @@ function getMemorySize(v: unknown) {
     return v8Serialize(v).byteLength // it gives a stable value-only proxy
 }
 
-async function replaceFile(old: string, new_: string) {
-    const temp = old + DELETE_ME + randomId()
-    const haveTemp = await rename(old, temp) // in case the file is locked by another process, we first make the name available
+async function replaceFile(path: string) {
+    const old = oldPath(path)
+    const haveOld = await rename(path, old) // in case the file is locked by another process, we first make the name available
         .then(() => true, e => {
             if (e.code === 'ENOENT') // not a problem, we mean to delete it anyway
                 return false
             throw e
         })
-    await rename(new_, old)
-    if (!haveTemp) return
-    setTimeout(async () => {
-        let retry = 4
-        while (retry--) {
-            if (await unlink(temp).then(() => 1, () => 0))
-                return
-            await new Promise(res => setTimeout(res, 500))
-        }
-    })
+    await rename(newPath(path), path)
+    if (haveOld)
+        unlinkEventually(old)
 }
 
-function randomId() {
-    return Math.random().toString(36).slice(2, 5)
+async function replaceFileForPair(mainPath: string, bucketPath: string) {
+    // this order keeps either the old pair or the new pair recoverable at every crash point
+    await rename(mainPath, oldPath(mainPath))
+    await rename(bucketPath, oldPath(bucketPath))
+    await rename(newPath(bucketPath), bucketPath)
+    await rename(newPath(mainPath), mainPath)
+    unlinkEventually(oldPath(mainPath))
+    unlinkEventually(oldPath(bucketPath))
+}
+
+async function prepareReplacement(path: string) {
+    // fixed replacement names must be clear before a new swap starts, otherwise rename could target a stale snapshot
+    await unlinkWithRetry(newPath(path))
+    await unlinkWithRetry(oldPath(path))
+}
+
+async function recoverReplacementFile(path: string, validateNew?: (path: string) => Promise<unknown>, cleanup=true) {
+    const state = await getReplacementState(path)
+    if (state.path) {
+        await cleanupReplacementFiles(path, cleanup)
+        return
+    }
+    if (state.old) {
+        await rename(oldPath(path), path)
+        if (cleanup)
+            await unlink(newPath(path)).catch(() => {})
+        return
+    }
+    if (!state.new) return
+    if (validateNew)
+        await validateNew(newPath(path))
+    await rename(newPath(path), path)
+}
+
+async function cleanupReplacementFiles(path: string, cleanup=true) {
+    if (!cleanup) return
+    await unlink(oldPath(path)).catch(() => {})
+    await unlink(newPath(path)).catch(() => {})
+}
+
+async function getReplacementState(path: string) {
+    const exists = (p: string) => stat(p).then(() => true, () => false)
+    return {
+        path: await exists(path),
+        old: await exists(oldPath(path)),
+        new: await exists(newPath(path)),
+    }
+}
+
+async function validateMainFile(path: string) {
+    const input = createReadStream(path)
+    const rl = readline.createInterface({ input })
+    for await (const line of rl) {
+        const record = JSON.parse(line)
+        if (typeof record?.k !== 'string')
+            throw Error(`invalid replacement main file: ${path}`)
+    }
+}
+
+function newPath(path: string) {
+    return path + '.new'
+}
+
+function oldPath(path: string) {
+    return path + '.old'
 }
 
 function streamReady(s: WriteStream) {
-    return s.pending && once(s, 'ready')
+    if (!s.pending) return
+    return new Promise<void>((res, rej) => {
+        const done = () => {
+            s.off('ready', done)
+            s.off('error', fail)
+            res()
+        }
+        const fail = (e: Error) => {
+            s.off('ready', done)
+            s.off('error', fail)
+            rej(e)
+        }
+        s.once('ready', done)
+        s.once('error', fail)
+        // very fast opens can clear pending before the listener observes ready
+        setImmediate(() => s.pending || done())
+    })
+}
+
+function closeStream(s: WriteStream) {
+    return new Promise<void>((res, rej) => {
+        s.once('error', rej)
+        s.end(res)
+    })
+}
+
+function unlinkEventually(path: string) {
+    // old snapshots are recoverable leftovers, so transient Windows locks should not make a successful replacement fail
+    setTimeout(() => unlinkWithRetry(path).catch(() => {}))
+}
+
+async function unlinkWithRetry(path: string) {
+    let retry = 4
+    while (retry--) {
+        const done = await unlink(path)
+            .then(() => true, e => e.code === 'ENOENT')
+        if (done) return
+        await new Promise(res => setTimeout(res, 500))
+    }
+    await unlink(path)
 }
 
 function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
