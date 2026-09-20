@@ -363,11 +363,12 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (v instanceof Function)
                     v = v(this.get())
                 // sync-check; in put it would be async
-                if (v) for (const x of [getUtf8Size(self.encode(v)), v instanceof Uint8Array && v.length || 0])
-                    if (x > self.fileThreshold)
-                        throw Error("singleSync value exceeds fileThreshold")
-                    else if (x > self.bucketThreshold)
-                        throw Error("singleSync value exceeds bucketThreshold")
+                if (v && (typeof v === 'string' || typeof v === 'object'))
+                    for (const x of [getUtf8Size(self.encode(v)), v instanceof Uint8Array && v.length || 0])
+                        if (x > self.fileThreshold)
+                            throw Error("singleSync value exceeds fileThreshold")
+                        else if (x > self.bucketThreshold)
+                            throw Error("singleSync value exceeds bucketThreshold")
                 self.put(key, v, { forceSync: true })
                 return v
             },
