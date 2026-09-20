@@ -586,13 +586,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 }
             }
 
-            const input = createReadStream(this.path)
+            // latin1 preserves byte counts even when an interrupted write contains incomplete UTF-8
+            const input = createReadStream(this.path, { encoding: 'latin1' })
             const rl = readline.createInterface({ input })
             let filePos = 0 // track where we are, to make Offloaded
             let nextFilePos = 0
             let newlineSize = 0
             for await (const line of rl) {
-                const lineBytes = getUtf8Size(line)
+                const lineBytes = line.length
                 filePos = nextFilePos
                 if (!newlineSize) {
                     const start = filePos + lineBytes  // filePos is zero, but it's good practice to include it
@@ -606,7 +607,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const bytesIncludingNL = lineBytes + newlineSize
                 // Crash/truncation may leave the last line without a newline; clamping keeps offsets aligned with on-disk bytes.
                 nextFilePos = Math.min(size, filePos + bytesIncludingNL)
-                const record = this.decode(line) as any
+                const record = this.decode(Buffer.from(line, 'latin1').toString('utf8')) as any
                 if (typeof record?.k !== 'string') { // malformed
                     this.wouldSave += bytesIncludingNL
                     continue

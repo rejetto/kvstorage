@@ -246,12 +246,12 @@ async function test() {
                 kv.on('errorDecoding', () => localDecodeErrors++)
                 await kv.open(FN, { clear: true })
                 const initialValue = 'S'.repeat(600)
-                const updatedValue = 'T'.repeat(600)
+                const updatedValue = 'T'.repeat(599) + 'à'
                 await kv.put('stable', initialValue)
-                await kv.put('tail', 'U'.repeat(30))
+                await kv.put('tail', 'U'.repeat(30) + '€')
                 await kv.close()
                 const fileBytes = readFileSync(FN)
-                // Dropping the final 5 bytes keeps the file mostly valid while guaranteeing an incomplete trailing record.
+                // removing the suffix leaves the first byte of € as an interrupted UTF-8 write
                 writeFileSync(FN, fileBytes.subarray(0, fileBytes.length - 5))
                 await kv.open(FN)
                 await kv.put('stable', updatedValue)
