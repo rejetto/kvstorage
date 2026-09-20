@@ -478,6 +478,28 @@ async function test() {
                 assert(rewriteBucketCount === 2, `rewrite bucket count ${rewriteBucketCount}`)
                 await kv.unlink()
             })
+            await measure('update-during-bucket-rewrite-regression', async () => {
+                const path = 'update-during-bucket-rewrite.db'
+                const kv = new KvStorage()
+                const first = Buffer.alloc(3_000, 'b')
+                const second = Buffer.alloc(3_000, 'c')
+                await kv.open(path, { clear: true })
+                await kv.put('obsolete', Buffer.alloc(3_000, 'a'))
+                await kv.put('first', first)
+                await kv.put('second', second)
+                await kv.del('obsolete')
+                let update
+                // accept an update while compaction is persisting the new bucket coordinates
+                kv.once('wrote', () => { update = kv.put('first', second) })
+                await kv.rewriteBucket()
+                await update
+                assert(second.equals(await kv.get('first')), 'update during bucket rewrite remains visible')
+                await kv.close()
+                await kv.open(path)
+                assert(second.equals(await kv.get('first')), 'update during bucket rewrite survives reopen')
+                assert(second.equals(await kv.get('second')), 'bucket rewrite preserves the other key')
+                await kv.unlink()
+            })
             await measure('empty-bucket-rewrite-regression', async () => {
                 const path = 'empty-bucket-rewrite.db'
                 const kv = new KvStorage({ rewriteOnOpen: false })

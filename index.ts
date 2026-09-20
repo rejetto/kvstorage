@@ -741,9 +741,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     protected mergePendingSnapshot(snapshot: typeof this.map) {
         const merged = new Map(snapshot)
         for (const [k, mv] of this.map.entries())
-            if (mv.pendingSince)
+            if (mv.pendingSince) {
+                const rewritten = snapshot.get(k)
+                // comparisons after the swap must read the rewritten bucket coordinates
+                if (rewritten?.bucket)
+                    mv.onDisk = rewritten
                 // pending writes started while the rewrite was running and still need to see themselves in the live map when their queued writer resumes
                 merged.set(k, mv)
+            }
         return merged
     }
 
