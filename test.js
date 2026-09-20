@@ -1,6 +1,7 @@
 const { KvStorage } = require('.')
 const { statSync, writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync, renameSync } = require('node:fs')
 const { join } = require('path')
+const { execFileSync } = require('node:child_process')
 
 test().catch(e => {
     console.error(e)
@@ -498,6 +499,27 @@ async function test() {
                 await kv.open(path)
                 assert(second.equals(await kv.get('first')), 'update during bucket rewrite survives reopen')
                 assert(second.equals(await kv.get('second')), 'bucket rewrite preserves the other key')
+                await kv.unlink()
+            })
+            await measure('pending-update-before-bucket-rewrite-regression', async () => {
+                const path = 'pending-before-bucket-rewrite.db'
+                // a real process exits after compaction without flushing its throttled update
+                execFileSync(process.execPath, ['-e', `
+                    const { KvStorage } = require(process.argv[1])
+                    ;(async () => {
+                        const kv = new KvStorage()
+                        await kv.open(process.argv[2], { clear: true })
+                        await kv.put('first', Buffer.alloc(3_000, 'a'))
+                        await kv.put('second', Buffer.alloc(3_000, 'b'))
+                        void kv.put('first', Buffer.alloc(3_000, 'c'), { delay: 60_000, maxDelay: 60_000 })
+                        await kv.rewriteBucket()
+                        process.exit(0)
+                    })().catch(e => { console.error(e); process.exit(1) })
+                `, require.resolve('.'), path], { timeout: 30_000 })
+                const kv = new KvStorage()
+                await kv.open(path)
+                assert(Buffer.alloc(3_000, 'a').equals(await kv.get('first')), 'compaction preserves saved value when pending update is interrupted')
+                assert(Buffer.alloc(3_000, 'b').equals(await kv.get('second')), 'compaction preserves neighboring saved value')
                 await kv.unlink()
             })
             await measure('empty-bucket-rewrite-regression', async () => {

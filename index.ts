@@ -517,15 +517,17 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             await prepareReplacement(path)
             await prepareReplacement(this.path)
             for (const [k, mv] of this.map.entries()) {
-                const encoded = await this.readBucketEncoded(mv)
+                // pending updates must keep their last persisted payload until the new value is written
+                const onDisk = mv.onDisk
+                const encoded = await this.readBucketEncoded(onDisk)
                 if (!encoded) continue
                 f ??= createWriteStream(rewriting, { flags: 'w' })
                 lastWrite = new Promise(res => f!.write(encoded, res))
-                const size = mv!.bucket![1]
-                const rec: MemoryValue<T> = { bucket: [ofs, size], format: mv!.format }
+                const size = onDisk!.bucket![1]
+                const rec: MemoryValue<T> = { bucket: [ofs, size], format: onDisk!.format }
                 rec.onDisk = rec
                 newMap.set(k, rec)
-                mainWouldSave += mv?.onDisk?.size ?? 0
+                mainWouldSave += onDisk?.size ?? 0
                 ofs += size
             }
             await lastWrite
