@@ -261,7 +261,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 // compare with value currently on disk
                 const encodeValue = (v: T | undefined) => v === undefined ? '' : self.encode(v)
                 const {onDisk} = will
-                const encodedOldValue = self.dontWriteSameValue && (
+                // external records have no inline value to compare, including when deleting
+                const encodedOldValue = self.dontWriteSameValue && !onDisk?.file && (
                     await self.readOffloadedEncoded(onDisk) ?? await self.readBucketEncoded(onDisk) ?? encodeValue(onDisk?.v) )
                 if (asBuffer && asBuffer.length > self.bucketThreshold)
                     // optimized bucket-buffer comparison

@@ -522,10 +522,10 @@ async function test() {
             })
             await measure('external-file-replace', async () => {
                 const FN2 = 'ext-replace.db'
-                const kv = new KvStorage({ fileThreshold: 10, rewriteOnOpen: false })
+                const kv = new KvStorage({ rewriteOnOpen: false })
                 await kv.open(FN2, { clear: true })
-                const big1 = Buffer.alloc(50, 'A')
-                const big2 = Buffer.alloc(50, 'B')
+                const big1 = Buffer.alloc(100_001, 'A')
+                const big2 = Buffer.alloc(100_001, 'B')
                 await kv.put('big', big1)
                 await kv.flush()
                 const folder = FN2 + '$'
@@ -536,6 +536,10 @@ async function test() {
                 const filesAfter = readdirSync(folder)
                 assert(filesAfter.length === 1, `old external file replaced: ${filesAfter.length}`)
                 assert(big2.equals(await kv.get('big')), 'external file updated value')
+                await kv.del('big')
+                await kv.close()
+                await kv.open(FN2)
+                assert(!kv.has('big') && await kv.get('big') === undefined, 'external file deletion survives reopen')
                 await kv.unlink()
             })
             await measure('external-file-collision-after-reopen', async () => {
