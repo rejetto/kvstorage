@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
-import { unlink, rename, mkdir, writeFile, rm, stat } from 'fs/promises'
+import { unlink, rename, mkdir, writeFile, appendFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
 import { dirname, join } from 'path'
 import { EventEmitter, once } from 'events'
@@ -575,10 +575,15 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             this.map.clear()
             // check if tail contains CR. the first line is checked in the for-loop
             const {size} = await stat(this.path)
-            if (size > 1) {
-                const lastTerminator = await stream2buffer(createReadStream(this.path, { start: size - 2, end: size - 1 }))
+            if (size) {
+                const lastTerminator = await stream2buffer(createReadStream(this.path, { start: Math.max(0, size - 2), end: size - 1 }))
                 if (lastTerminator.includes(13))
                     await this.normalizeMainFile()
+                if (lastTerminator[lastTerminator.length - 1] !== 10) {
+                    // separate an interrupted append from future records before calculating offsets
+                    await appendFile(this.path, '\n')
+                    return this.load()
+                }
             }
 
             const input = createReadStream(this.path)

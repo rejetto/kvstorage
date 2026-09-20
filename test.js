@@ -241,12 +241,12 @@ async function test() {
             })
             await measure('truncated-tail-regression', async () => {
                 const FN = 'truncated-tail.db'
-                const kv = new KvStorage({ memoryThreshold: 1, rewriteOnOpen: false })
+                const kv = new KvStorage()
                 let localDecodeErrors = 0
                 kv.on('errorDecoding', () => localDecodeErrors++)
                 await kv.open(FN, { clear: true })
-                const initialValue = 'S'.repeat(30)
-                const updatedValue = 'T'.repeat(30)
+                const initialValue = 'S'.repeat(600)
+                const updatedValue = 'T'.repeat(600)
                 await kv.put('stable', initialValue)
                 await kv.put('tail', 'U'.repeat(30))
                 await kv.close()
@@ -257,6 +257,9 @@ async function test() {
                 await kv.put('stable', updatedValue)
                 assert(await kv.get('stable') === updatedValue, 'truncated tail keeps offloaded writes working')
                 assert(localDecodeErrors > 0, `truncated tail detected ${localDecodeErrors}`)
+                await kv.close()
+                await kv.open(FN)
+                assert(await kv.get('stable') === updatedValue, 'write after truncated tail survives another reopen')
                 await kv.unlink()
             })
             await measure('clear-after-close-stale-rewrite-regression', async () => {
