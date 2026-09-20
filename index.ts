@@ -252,7 +252,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await writeFile(fullPath, content)
                 const newRecord = { file: filename, format, onDisk: inMemoryNow } satisfies MemoryValue<T>
                 await self.appendRecord(key, newRecord)
-                self.map.set(key, newRecord) // offload
             }
             try {
                 const asBuffer = value instanceof Uint8Array && value
@@ -277,11 +276,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (encodedNewValueSize > self.bucketThreshold)
                     return self.appendBucket(key, encodedNewValue)
                 const { offset, size } = await self.appendRecord(key, will)
-                if (!forceSync && getMemorySize(value) > self.memoryThreshold) // once written, consider offloading
+                if (!forceSync && self.map.get(key) === will && getMemorySize(value) > self.memoryThreshold) // don't offload over a newer pending value
                     self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
             }
             finally {
-                if (value === undefined)
+                if (value === undefined && self.map.get(key) === will) // don't delete a newer pending value
                     self.map.delete(key)
             }
         }
@@ -668,6 +667,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         mv.waited = undefined // reset
         mv.size = res.size
         mv.onDisk = mv
+        if (!rewriting) {
+            const current = this.map.get(key)
+            // a put accepted during I/O keeps its value but must compare against the write that just completed
+            if (current?.pendingSince)
+                current.onDisk = mv
+            else
+                this.map.set(key, mv)
+        }
         return res
     }
 
@@ -749,7 +756,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         }
         this.bucketSize += size
         await this.appendRecord(key, rec)
-        this.map.set(key, rec)
     }
 
     protected async normalizeMainFile() {

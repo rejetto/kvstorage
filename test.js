@@ -542,6 +542,31 @@ async function test() {
                 assert(!kv.has('big') && await kv.get('big') === undefined, 'external file deletion survives reopen')
                 await kv.unlink()
             })
+            await measure('update-during-write-regression', async () => {
+                const path = 'update-during-write.db'
+                const cases = [
+                    ['inline', 'intermediate'],
+                    ['offloaded', 'a'.repeat(600)],
+                    ['bucket', Buffer.alloc(3_000, 'a')],
+                    ['external', Buffer.alloc(100_001, 'a')],
+                    ['delete', undefined],
+                ]
+                for (const [name, intermediate] of cases) {
+                    const kv = new KvStorage({ rewriteOnOpen: false })
+                    await kv.open(path, { clear: true })
+                    await kv.put('key', 'latest')
+                    let lastPut
+                    // queue a real update after the first value is encoded, while its disk write is in flight
+                    kv.once('write', () => { lastPut = kv.put('key', 'latest') })
+                    await kv.put('key', intermediate)
+                    await lastPut
+                    assert(await kv.get('key') === 'latest', `${name}: last update survives in-flight write`)
+                    await kv.close()
+                    await kv.open(path)
+                    assert(await kv.get('key') === 'latest', `${name}: last update survives reopen`)
+                    await kv.unlink()
+                }
+            })
             await measure('external-file-collision-after-reopen', async () => {
                 const FN2 = 'ext-collision-reopen.db'
                 let kv = new KvStorage({ fileThreshold: 1 })
