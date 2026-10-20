@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, WriteStream } from 'fs'
 import { unlink, rename, mkdir, writeFile, appendFile, rm, stat } from 'fs/promises'
 import { buffer as stream2buffer, text as stream2string } from 'node:stream/consumers'
-import { dirname, join } from 'path'
+import { dirname, join, resolve as resolvePath } from 'path'
 import { EventEmitter, once } from 'events'
 import { pipeline } from 'stream/promises'
 import { Transform } from 'stream'
@@ -16,6 +16,8 @@ type JsonArray<EXPAND> = Jsonable<EXPAND>[]
 type Encodable = undefined | Jsonable<Buffer | Date>
 type Reviver = (k: string, v: any) => any
 type Encoder = (k: string | undefined, v: any, skip: object) => any
+
+const openPaths = new Set<string>()
 
 // info related to a value of a specific key (not included)
 type MemoryValue<T> = {
@@ -76,6 +78,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     // keep track of the actual number of keys, since deleted keys are in memory until they are discarded from the disk as well
     protected mapRealSize = 0
     protected path = ''
+    protected reservedPath?: string
     protected folder = ''
     protected _isOpen = false
     protected isDeleting = false
@@ -90,8 +93,11 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     protected bucketWouldSave = 0
     // used to avoid parallel writings
     protected lockWrite: Promise<unknown> = Promise.resolve()
-    // used to account also for delayed writings
+    // latest scheduled operation, also observed by rewrite listeners
     protected lockFlush: Promise<unknown> = Promise.resolve()
+    // each caller must wait for its own record, even when other keys are queued later
+    protected pendingWrites = new Map<MemoryValue<T>, Promise<unknown>>()
+    protected writeError?: Error
     // keep track, to not issue more than one
     protected rewritePending: undefined | Promise<unknown>
     // keep track, to not issue more than one
@@ -121,10 +127,18 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     async open(path: string, { clear=false }={}) {
         if (!path)
             throw Error("invalid path")
-        return this.opening ??= new Promise<void>(async (resolve, reject) => {
+        if (this.opening) return this.opening
+        if (this._isOpen)
+            throw Error("cannot open twice")
+        const reservedPath = resolvePath(path)
+        if (openPaths.has(reservedPath))
+            throw Error(`storage already open in this process: ${reservedPath}`)
+        // reserve before any I/O, including clear and recovery, so concurrent opens cannot modify the same database
+        openPaths.add(reservedPath)
+        this.reservedPath = reservedPath
+        return this.opening = new Promise<void>(async (resolve, reject) => {
             try {
-                if (this._isOpen)
-                    throw Error("cannot open twice")
+                this.writeError = undefined
                 this.path = path
                 this.folder = path + '$'
                 this.bucketPath = path + '-bucket'
@@ -147,13 +161,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await this.load()
                 if (this.rewriteOnOpen)
                     await this.considerRewrite()
-                this.fileStream ??= createWriteStream(path, { flags: 'a' })
+                this.fileStream ??= this.createStorageStream(path, 'a')
                 await streamReady(this.fileStream)
                 this._isOpen = true
                 this.emit('open')
                 resolve()
             }
             catch(e) {
+                await this.releaseStorage().catch(() => {})
                 reject(e)
             }
             finally {
@@ -163,24 +178,45 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     async close() {
-        await this.flush()
-        this._isOpen = false // during flush we accept new put() calls, but now the time is over
-        await this.flush() // writes accepted during the first flush can update lockFlush after its snapshot, so drain once more before closing streams
-        if (this.fileStream)
-            await new Promise(res => this.fileStream!.close(res))
-        this.fileStream = undefined
-        if (this.bucketStream)
-            await new Promise(res => this.bucketStream!.close(res))
-        this.bucketStream = undefined
-        this.map.clear()
+        try {
+            await this.flush()
+            this._isOpen = false // during flush we accept new put() calls, but now the time is over
+            await this.flush() // drain writes accepted during the first flush before closing streams
+        }
+        finally {
+            // an I/O failure must still release handles so the storage can be reopened
+            await this.releaseStorage()
+        }
     }
 
-    async flush(): typeof this.lockFlush {
+    protected async releaseStorage() {
+        this._isOpen = false
+        const streams = [this.fileStream, this.bucketStream]
+        this.fileStream = this.bucketStream = undefined
+        const results = await Promise.allSettled(streams.map(s => s && new Promise<void>((resolve, reject) =>
+            s.close(error => error ? reject(error) : resolve()))))
+        this.map.clear()
+        // keep ownership until every stream has finished closing, even when one reports an error
+        if (this.reservedPath) {
+            openPaths.delete(this.reservedPath)
+            this.reservedPath = undefined
+        }
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failed) throw failed.reason
+    }
+
+    async flush(): Promise<void> {
         this.emit('flush')
-        const current = this.lockFlush // wait lockFlush, because a write may have been delayed and only then lockWrite will be set
-        await current
-        await this.lockWrite // flushed waits may append several writes to lockWrite before all of them finish
-        return this.lockFlush === current || this.flush() // if more puts arrived meanwhile, recur and emit 'flush' again so the new pending writes skip waiting
+        // drain every accepted write before reporting an error, especially when close() is waiting
+        const results = await Promise.allSettled(this.pendingWrites.values())
+        const current = this.lockWrite
+        await Promise.allSettled([current, this.rewritePending, this.rewriteBucketPending])
+        // compactions can queue more compactions; drain their full lifecycle before closing streams
+        if (this.pendingWrites.size || this.lockWrite !== current || this.rewritePending || this.rewriteBucketPending)
+            await this.flush()
+        if (this.writeError) throw this.writeError
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failed) throw failed.reason
     }
 
     async clear() {
@@ -191,8 +227,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     async put(key: string, value: T | undefined, { delay=this.defaultPutDelay, maxDelay=this.maxPutDelay, maxDelayCreate=this.maxPutDelayCreate, forceSync=false }={}) {
         if (!this._isOpen)
             throw Error("storage not open")
+        if (this.writeError) throw this.writeError
         const was = this.map.get(key)
-        if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value) return // quick sync check, good for primitive values and objects identity. If you delete a missing value, we'll exit here
+        if (!was?.file && was?.offloaded === undefined && !was?.bucket && was?.v === value)
+            return was && this.pendingWrites.get(was) // identical pending values still need to reach disk
         const wasDefined = isMemoryValueDefined(was)
         const willBeDefined = value !== undefined
         // keep size tied to key existence, independently from where the value is stored
@@ -206,7 +244,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             // this is an important optimization for bursts of writes: we update existing promise and objects instead of piling up new ones
             was.v = value
             was.pendingSince = start
-            return this.lockFlush
+            return this.pendingWrites.get(was)
         }
         const will: MemoryValue<T> = { v: value, onDisk: was?.onDisk, waited: was?.waited, pendingSince: start } // keep reference to what's on disk
         this.map.set(key, will)
@@ -214,22 +252,47 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         if (!was?.onDisk || was?.v === undefined) // maxDelayCreate applies both to values never written and missing values
             maxDelay = maxDelayCreate ?? maxDelay
         const toWait = Math.max(0, Math.min(delay, maxDelay - (was?.waited || 0)))
-        return this.lockFlush = this.wait(toWait).then(writeLater)
+        const writing = this.lockFlush = this.wait(toWait).then(writeLater)
+        this.pendingWrites.set(will, writing)
+        void writing.then(cleanup, cleanup)
+        return writing
+
+        function cleanup() {
+            self.pendingWrites.delete(will)
+        }
+
+        function restoreConfirmedValue() {
+            // restore confirmed state after a failed save without overwriting a newer accepted update
+            if (self.map.get(key) === will && will.onDisk !== will) {
+                const defined = Boolean(isMemoryValueDefined(will))
+                const persisted = Boolean(isMemoryValueDefined(will.onDisk))
+                if (defined !== persisted)
+                    self.mapRealSize += persisted ? 1 : -1
+                if (will.onDisk)
+                    self.map.set(key, will.onDisk)
+                else
+                    self.map.delete(key)
+            }
+        }
 
         function writeLater(flushed = false): Promise<unknown> {
             const totalWaited = (will.waited || 0) + Date.now() - start
             const idleWaited = Date.now() - (will.pendingSince || start)
-            if (flushed) // flush() is expected to drain pending puts immediately instead of re-arming the coalescing delay.
-                return self.lockWrite = self.lockWrite.then(writeValue)
             // if the key was updated recently, keep stretching the same pending write until idle>=delay or maxDelay is exhausted
-            if (idleWaited < delay && totalWaited < maxDelay)
+            if (!flushed && idleWaited < delay && totalWaited < maxDelay)
                 return self.wait(Math.min(delay - idleWaited, maxDelay - totalWaited)).then(writeLater)
-            return self.lockWrite = self.lockWrite.then(writeValue)
+            return self.queueWrite(async () => {
+                try { await writeValue() }
+                catch (error) {
+                    // rollback must finish before the next queued compaction can snapshot the map
+                    restoreConfirmedValue()
+                    throw error
+                }
+            })
         }
 
         async function writeValue() {
             if (self.isDeleting) return
-            if (will.onDisk === will) return // written by a rewrite()
             value = will.v
             will.pendingSince = undefined
             const inMemoryNow = self.map.get(key)
@@ -240,9 +303,14 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             }
             const {folder} = self
             const oldFile = inMemoryNow?.onDisk?.file // don't use `was` as an async writing could have happened in the meantime
+            await persistValue()
+            if (value === undefined && self.map.get(key) === will) // don't delete a newer pending value
+                self.map.delete(key)
+            // keep the last confirmed payload until its replacement or tombstone is in the journal
             if (oldFile)
                 await unlink(join(folder, oldFile))
-            const saveExternalFile = async (content: Uint8Array | string, format?: 'json') => {
+
+            async function saveExternalFile(content: Uint8Array | string, format?: 'json') {
                 let filename = self.keyToFileName(key)
                 const n = self.files.get(filename)
                 self.files.set(filename, (n || 0) + 1)
@@ -253,7 +321,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const newRecord = { file: filename, format, onDisk: inMemoryNow } satisfies MemoryValue<T>
                 await self.appendRecord(key, newRecord)
             }
-            try {
+
+            async function persistValue() {
                 const asBuffer = value instanceof Uint8Array && value
                 if (asBuffer && asBuffer.length > self.fileThreshold) // optimization for simple buffers, but we don't compare with old buffer content
                     return saveExternalFile(asBuffer)
@@ -278,10 +347,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const { offset, size } = await self.appendRecord(key, will)
                 if (!forceSync && self.map.get(key) === will && getMemorySize(value) > self.memoryThreshold) // don't offload over a newer pending value
                     self.map.set(key, { offloaded: offset, size, onDisk: will.onDisk })
-            }
-            finally {
-                if (value === undefined && self.map.get(key) === will) // don't delete a newer pending value
-                    self.map.delete(key)
             }
         }
     }
@@ -379,7 +444,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     async asObject() {
         const ret: any = {}
         for await (const [k, v] of this.iterator())
-            ret[k] = v
+            Object.defineProperty(ret, k, { value: v, enumerable: true, configurable: true, writable: true })
         return ret
     }
 
@@ -473,7 +538,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
     }
 
     rewrite() {
-        return this.rewritePending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
+        return this.rewritePending ||= this.lockFlush = this.queueWrite(async () => {
             if (this.isDeleting)
                 return this.rewritePending = undefined
             this.emit('rewrite', this.rewritePending)
@@ -482,11 +547,13 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             if (this.fileStream?.writable)
                 await closeStream(this.fileStream)
             await prepareReplacement(path)
-            this.fileStream = createWriteStream(rewriting, { flags: 'w' })
+            this.fileStream = this.createStorageStream(rewriting, 'w')
             this.fileSize = 0
             this.wouldSave = 0
             for (const k of this.map.keys()) {
-                const mv = this.map.get(k)
+                const current = this.map.get(k)
+                // compaction copies confirmed records; delayed updates retain their own writer and promise
+                const mv = current?.pendingSince ? current.onDisk : current
                 if (!mv || 'v' in mv && mv.v === undefined || !mv.onDisk) continue // no value, or not written yet
                 const {offset} = await this.appendRecord(k, mv, true)
                 if (mv?.size && mv.offloaded !== undefined)
@@ -494,15 +561,17 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             }
             await closeStream(this.fileStream)
             await replaceFile(path)
-            this.fileStream = createWriteStream(path, { flags: 'a' })
+            this.fileStream = this.createStorageStream(path, 'a')
             await streamReady(this.fileStream)
-            this.rewritePending = undefined
-            void this.flush()
-        })
+            void this.flush().catch(() => {}) // put callers observe encoding errors; stream failures remain in writeError
+        }).catch(e => {
+            this.writeError ??= e
+            throw e
+        }).finally(() => { this.rewritePending = undefined })
     }
 
     rewriteBucket() {
-        return this.rewriteBucketPending ||= this.lockFlush = this.lockWrite = this.lockWrite.then(async () => {
+        return this.rewriteBucketPending ||= this.lockFlush = this.queueWrite(async () => {
             if (this.isDeleting)
                 return this.rewriteBucketPending = undefined
             this.emit('rewriteBucket', this.rewriteBucketPending)
@@ -510,7 +579,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
             const rewriting = newPath(path) // use same volume, to be sure we can rename to destination
             const mainRewriting = newPath(this.path)
             let f: typeof this.bucketStream
-            let lastWrite: any
             let ofs = 0
             let mainWouldSave = 0
             const newMap = new Map(this.map)
@@ -521,8 +589,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const onDisk = mv.onDisk
                 const encoded = await this.readBucketEncoded(onDisk)
                 if (!encoded) continue
-                f ??= createWriteStream(rewriting, { flags: 'w' })
-                lastWrite = new Promise(res => f!.write(encoded, res))
+                f ??= this.createStorageStream(rewriting, 'w')
+                await this.writeStream(f, encoded)
                 const size = onDisk!.bucket![1]
                 const rec: MemoryValue<T> = { bucket: [ofs, size], format: onDisk!.format }
                 rec.onDisk = rec
@@ -530,7 +598,6 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 mainWouldSave += onDisk?.size ?? 0
                 ofs += size
             }
-            await lastWrite
             if (!f) { // empty
                 if (this.bucketStream)
                     await closeStream(this.bucketStream)
@@ -543,8 +610,8 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await closeStream(f)
                 if (this.bucketStream)
                     await closeStream(this.bucketStream)
-                await pipeline(createReadStream(this.path), createWriteStream(mainRewriting, { flags: 'w' }))
-                this.fileStream = createWriteStream(mainRewriting, { flags: 'a' })
+                await pipeline(createReadStream(this.path), this.createStorageStream(mainRewriting, 'w'))
+                this.fileStream = this.createStorageStream(mainRewriting, 'a')
                 this.fileSize = (await stat(mainRewriting)).size
                 // append bucket coordinates to db.new so the official main and bucket files switch as a recoverable pair
                 for (const [k, v] of newMap.entries())
@@ -555,18 +622,20 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 await replaceFileForPair(this.path, path)
                 this.map = this.mergePendingSnapshot(newMap)
                 this.fileSize = fileSize
-                this.fileStream = createWriteStream(this.path, { flags: 'a' })
+                this.fileStream = this.createStorageStream(this.path, 'a')
                 await streamReady(this.fileStream)
-                this.bucketStream = createWriteStream(path, { flags: 'a' })
+                this.bucketStream = this.createStorageStream(path, 'a')
                 await streamReady(this.bucketStream)
             }
             this.wouldSave += mainWouldSave
             this.bucketSize = ofs
             this.bucketWouldSave = 0
-            this.rewriteBucketPending = undefined
             if (this.rewriteLater)
-                void this.considerRewrite()
-        })
+                void this.considerRewrite().catch(e => { this.writeError ??= e })
+        }).catch(e => {
+            this.writeError ??= e
+            throw e
+        }).finally(() => { this.rewriteBucketPending = undefined })
     }
 
     protected async load(): Promise<void> {
@@ -670,7 +739,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 this.wouldSave += res.size
             this.bucketWouldSave += this.map.get(key)?.onDisk?.bucket?.[1] ?? 0
             if (this.rewriteLater)
-                void this.considerRewrite()
+                void this.considerRewrite().catch(e => { this.writeError ??= e })
         }
         mv.waited = undefined // reset
         mv.size = res.size
@@ -737,8 +806,39 @@ export class KvStorage<T=Encodable> extends EventEmitter {
         const size = getUtf8Size(line)
         this.fileSize += size + 1 // 1=newline
         this.emit('write', line)
-        await new Promise(res => this.fileStream!.write(line + '\n', res))
+        await this.writeStream(this.fileStream!, line + '\n')
         return { offset, size }
+    }
+
+    protected queueWrite(write: () => Promise<unknown>) {
+        const operation = this.lockWrite.then(() => {
+            if (this.writeError) throw this.writeError
+            return write()
+        })
+        // a rejected value (for example an encoder exception) must not poison the serialization queue
+        this.lockWrite = operation.catch(() => {})
+        return operation
+    }
+
+    protected createStorageStream(path: string, flags: 'a' | 'w') {
+        const stream = createWriteStream(path, { flags })
+        // callback rejection alone does not handle the error event; a failed stream cannot accept more writes
+        stream.on('error', error => { this.writeError ??= error })
+        return stream
+    }
+
+    protected writeStream(stream: WriteStream, data: string | Uint8Array | Buffer) {
+        return new Promise<void>((resolve, reject) => {
+            stream.write(data, error => {
+                if (error) {
+                    // the callback precedes the error event, so reject further writes immediately
+                    this.writeError ??= error
+                    reject(error)
+                }
+                else
+                    resolve()
+            })
+        })
     }
 
     protected mergePendingSnapshot(snapshot: typeof this.map) {
@@ -757,9 +857,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
 
     protected async appendBucket(key: string, what: string | Uint8Array) {
         this.bucketSize ||= await stat(this.bucketPath).then(x => x.size, () => 0)
-        this.bucketStream ||= createWriteStream(this.bucketPath, { flags: 'a' })
+        this.bucketStream ||= this.createStorageStream(this.bucketPath, 'a')
         this.emit('writeBucket', what)
-        await new Promise(res => this.bucketStream!.write(what, res))
+        await this.writeStream(this.bucketStream, what)
         const isString = typeof what === 'string'
         const size = isString ? getUtf8Size(what) : what.length
         const rec: MemoryValue<T> = {
@@ -910,9 +1010,8 @@ function streamReady(s: WriteStream) {
 }
 
 function closeStream(s: WriteStream) {
-    return new Promise<void>((res, rej) => {
-        s.once('error', rej)
-        s.end(res)
+    return new Promise<void>((resolve, reject) => {
+        s.end((error?: Error | null) => error ? reject(error) : resolve())
     })
 }
 

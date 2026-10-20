@@ -34,6 +34,7 @@ async function test() {
     }
     try {
         await measure('all', async () => {
+            await require('./test-writes.cjs')(measure)
             await measure('basics', async () => {
                 assert(!db.isOpening(), 'before isOpening')
                 db.open(FN, { clear: true })
@@ -366,10 +367,12 @@ async function test() {
                 const first = new KvStorage({ rewriteOnOpen: false })
                 await first.open(FN, { clear: true })
                 const second = new KvStorage({ rewriteOnOpen: false })
+                await require('node:assert/strict').rejects(second.open(FN), /already open/)
+                assert(first.isOpen() && !second.isOpen(), 'second instance cannot open the same storage')
+                await first.close()
                 await second.open(FN)
-                assert(first.isOpen() && second.isOpen(), 'multiple instances can open same storage')
                 await second.put('k', 'v')
-                assert(await second.get('k') === 'v', 'second instance can write')
+                assert(await second.get('k') === 'v', 'second instance can write after the first closes')
                 await second.close()
                 await first.close()
                 const reloaded = new KvStorage({ rewriteOnOpen: false })

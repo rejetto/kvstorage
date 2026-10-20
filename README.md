@@ -11,7 +11,10 @@
 - Append-only, log-structured writes with periodic compaction
 - Throttled writes to disk
 - Crash-safe compaction/rewrite
-- Opening the same database path from multiple KvStorage instances or processes at the same time is not supported
+- Only one KvStorage instance per database can be open in a process.
+  - The path is reserved during opening and released after close or a failed open.
+  - Relative and absolute paths are matched; symlink and hard-link aliases are not detected.
+  - Concurrent access from separate processes is unsupported.
 
 KvStorage was designed to store small/medium data sets of JSON-serializable values, plus `Date` and `Buffer`, when keeping all keys in memory is acceptable.
 
@@ -59,7 +62,7 @@ setTimeout(() => {
 Same as above, but different API
 ```javascript
 const age = db.singleSync('age', 0)
-aget.set(33)
+age.set(33)
 setTimeout(() => {
     console.log(age.get())
 })
@@ -101,6 +104,9 @@ The `any` below actually means a value that can be JSON-encoded (plus Date and B
   - Like get, but works only with values that are not offloaded, specifically those smaller than the memoryThreshold, bucketThreshold, and fileThreshold.
 - `put(key: string, value: any, { delay, maxDelay, maxDelayCreate }?): Promise<void>`
   - Add/overwrite a value. Await-ing this is optional, unless you need to know that the file has been written.
+  - Encoding or write failures reject the promise. Encoding failures preserve the last confirmed value and do not block later writes. 
+    A journal/bucket stream or compaction failure requires closing and reopening the storage before writing again;
+    `close()` releases file handles even when it rejects.
   - Adding a delay may save some writings for fast-changing values. Since the delay is renewed at each put, we can put a
     limit to that, and can have a generic limit with `maxDelay` or one specific for keys that weren't written to disk yet,
     as you may care more about the existence of a (persisted) record than its updates.
