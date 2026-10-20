@@ -372,6 +372,29 @@ module.exports = async function(measure) {
                 assert.ok(!kv.has('key'))
             }
         })
+
+        await measure('singleSync preserves null instead of replacing it with the default', async () => {
+            const { kv, path } = await storage()
+            const state = kv.singleSync('key', 1)
+            await state.ready()
+            assert.equal(state.get(), 1)
+            state.set(null)
+            assert.equal(state.get(), null)
+            await kv.flush()
+            assert.equal(await kv.get('key'), null)
+            await kv.close()
+            await kv.open(path)
+            const reloaded = kv.singleSync('key', 1)
+            await reloaded.ready()
+            assert.equal(reloaded.get(), null)
+            reloaded.set(previous => {
+                assert.equal(previous, null)
+                return 2
+            })
+            await kv.flush()
+            assert.equal(reloaded.get(), 2)
+            assert.equal(await kv.get('key'), 2)
+        })
     }
     finally {
         for (const { kv, folder } of resources) {

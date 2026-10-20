@@ -423,7 +423,10 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 if (v === undefined) throw Error("singleSync value not ready")
                 self.map.set(key, { v, onDisk: rec }) // restore sync reads after memoryThreshold offloaded the value
             },
-            get() { return self.getSync(key) as ST ?? def },
+            get() {
+                const value = self.getSync(key)
+                return value === undefined ? def : value as ST
+            },
             set(v: ST | ((was: ST) => ST)) {
                 if (v instanceof Function)
                     v = v(this.get())
