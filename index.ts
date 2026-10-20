@@ -1032,5 +1032,5 @@ async function unlinkWithRetry(path: string) {
 }
 
 function isMemoryValueDefined(mv: MemoryValue<unknown> | undefined) {
-    return mv?.v !== undefined || mv?.offloaded !== undefined || mv?.file || mv?.bucket
+    return Boolean(mv?.v !== undefined || mv?.offloaded !== undefined || mv?.file || mv?.bucket)
 }

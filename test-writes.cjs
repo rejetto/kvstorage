@@ -352,6 +352,26 @@ module.exports = async function(measure) {
                 assert.deepEqual(restored, value)
             }
         })
+
+        await measure('size counts keys once across bucket and external updates', async () => {
+            for (const size of [3_000, 100_001]) {
+                const { kv, path } = await storage()
+                await kv.put('key', Buffer.alloc(size, 'a'))
+                assert.equal(kv.size(), 1)
+                await kv.put('key', Buffer.alloc(size, 'b'))
+                assert.equal(kv.size(), 1, 'replacing a value must not add a key')
+                await kv.close()
+                await kv.open(path)
+                assert.equal(kv.size(), 1, 'reloading updates must count the key once')
+                assert.deepEqual(await kv.get('key'), Buffer.alloc(size, 'b'))
+                await kv.del('key')
+                assert.equal(kv.size(), 0)
+                await kv.close()
+                await kv.open(path)
+                assert.equal(kv.size(), 0, 'reloading a deleted key must keep the storage empty')
+                assert.ok(!kv.has('key'))
+            }
+        })
     }
     finally {
         for (const { kv, folder } of resources) {
