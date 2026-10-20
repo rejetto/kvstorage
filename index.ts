@@ -782,7 +782,7 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                 const array = self.digArrays && Array.isArray(x)
                 if (x.constructor !== Object && !array)
                     return x
-                // lazy shallow-clone
+                // define own properties so "__proto__" survives cloning
                 let ret = x
                 for (const [k, v] of Object.entries(x)) {
                     const res = recur(v, k)
@@ -791,9 +791,9 @@ export class KvStorage<T=Encodable> extends EventEmitter {
                         ret = array ? [] : {}
                         for (const [pk, pv] of Object.entries(x)) // copy previous entries
                             if (pk === k) break
-                            else ret[pk] = pv
+                            else Object.defineProperty(ret, pk, { value: pv, enumerable: true, configurable: true, writable: true })
                     }
-                    ret[k] = res
+                    Object.defineProperty(ret, k, { value: res, enumerable: true, configurable: true, writable: true })
                 }
                 return ret
             })(v)

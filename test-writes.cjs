@@ -333,6 +333,25 @@ module.exports = async function(measure) {
             assert.ok(Object.getOwnPropertyDescriptor(result, '__proto__'))
             assert.deepEqual(result.__proto__, { example: true })
         })
+
+        await measure('proto serialization preserves own properties when encoding dates', async () => {
+            for (const nested of [false, true]) {
+                const { kv, path } = await storage()
+                const value = JSON.parse('{"__proto__":{"flag":true}}')
+                const date = new Date('2026-01-02T03:04:05.000Z')
+                if (nested)
+                    value.__proto__.date = date
+                else
+                    value.date = date
+                await kv.put('object', value)
+                await kv.close()
+                await kv.open(path)
+                const restored = await kv.get('object')
+                assert.equal(Object.getPrototypeOf(restored), Object.prototype)
+                assert.ok(Object.getOwnPropertyDescriptor(restored, '__proto__'))
+                assert.deepEqual(restored, value)
+            }
+        })
     }
     finally {
         for (const { kv, folder } of resources) {
